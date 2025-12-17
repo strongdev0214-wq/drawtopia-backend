@@ -1697,7 +1697,7 @@ async def generate_book_pdf(book_id: str):
         #     raise HTTPException(status_code=400, detail=f"Invalid book ID: {book_id}")
         
         # Get story/book information
-        story_response = supabase.table("stories").select("*").eq("id", book_id).execute()
+        story_response = supabase.table("stories").select("*").eq("uid", book_id).execute()
         
         if not story_response.data or len(story_response.data) == 0:
             raise HTTPException(status_code=404, detail=f"Book {book_id} not found")
