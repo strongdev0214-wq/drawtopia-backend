@@ -1838,7 +1838,7 @@ async def generate_book_pdf(book_id: str):
             raise HTTPException(status_code=500, detail="Failed to upload PDF to storage")
         
         # Update story record with PDF URL
-        update_response = supabase.table("stories").update({"pdf_url": pdf_url}).eq("id", book_id).execute()
+        update_response = supabase.table("stories").update({"pdf_url": pdf_url}).eq("uid", book_id).execute()
         
         if not update_response.data:
             logger.warning(f"Failed to update story {book_id} with PDF URL")
