@@ -1133,6 +1133,12 @@ class JobStatusResponse(BaseModel):
     error_message: Optional[str] = None
     result_data: Optional[Dict[str, Any]] = None
 
+# Response model for PDF generation
+class PDFGenerationResponse(BaseModel):
+    success: bool
+    pdf_url: Optional[str] = None
+    message: str
+
 async def background_worker():
     """Background worker that processes jobs from the queue"""
     logger.info("Background worker started")
@@ -1675,7 +1681,7 @@ async def download_book_pdf(
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
-@app.post("/api/books/{book_id}/generate-pdf")
+@app.post("/api/books/{book_id}/generate-pdf", response_model=PDFGenerationResponse)
 async def generate_book_pdf(book_id: str):
     """
     Generate PDF on-demand for a book/story
@@ -1697,10 +1703,21 @@ async def generate_book_pdf(book_id: str):
         #     raise HTTPException(status_code=400, detail=f"Invalid book ID: {book_id}")
         
         # Get story/book information
+        # Try uid first, then fallback to id
         story_response = supabase.table("stories").select("*").eq("uid", book_id).execute()
         
+        # If no result with uid, try id (in case uid doesn't exist in database)
         if not story_response.data or len(story_response.data) == 0:
-            raise HTTPException(status_code=404, detail=f"Book {book_id} not found")
+            logger.info(f"No story found with uid={book_id}, trying id...")
+            try:
+                # Try to convert to integer for id lookup
+                book_id_int = int(book_id)
+                story_response = supabase.table("stories").select("*").eq("id", book_id_int).execute()
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert {book_id} to integer for id lookup")
+        
+        if not story_response.data or len(story_response.data) == 0:
+            raise HTTPException(status_code=404, detail=f"Book {book_id} not found (tried both uid and id)")
         
         story = story_response.data[0]
         
@@ -1715,7 +1732,11 @@ async def generate_book_pdf(book_id: str):
         
         # Prepare data for PDF generation
         story_title = story.get("story_title") or "Untitled Story"
+        story_cover = story.get("story_cover")  # Cover image URL
         scene_images = story.get("scene_images", [])
+        
+        # Limit to 4 scene images as requested
+        scene_images = scene_images[:4] if scene_images else []
         
         if not scene_images or len(scene_images) == 0:
             raise HTTPException(
@@ -1726,14 +1747,16 @@ async def generate_book_pdf(book_id: str):
         # Import PDF generator
         from pdf_generator import generate_pdf
         
-        # Generate simple PDF: cover page + one full page per scene image + back cover
-        logger.info(f"Generating PDF with {len(scene_images)} scene images")
+        # Generate PDF with cover image + 4 scene images
+        logger.info(f"Generating PDF with cover image and {len(scene_images)} scene images")
+        logger.info(f"Cover image URL: {story_cover}")
         
         pdf_bytes = generate_pdf(
-            pdf_type="simple_scenes",
-            character_name="",  # Not needed for simple format
+            pdf_type="cover_and_scenes",
+            character_name="",  # Not needed for this format
             story_title=story_title,
-            scene_urls=scene_images  # All scene images, each becomes one page
+            scene_urls=scene_images,  # First 4 scene images
+            cover_image_url=story_cover  # Story cover image
         )
         
         if not pdf_bytes:
