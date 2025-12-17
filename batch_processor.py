@@ -5,6 +5,7 @@ Handles processing of book generation jobs with format-specific parallelization
 
 import logging
 import asyncio
+import time
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from queue_manager import QueueManager, JobStatus, StageStatus, StageName
@@ -13,6 +14,10 @@ import requests
 import base64
 from io import BytesIO
 from PIL import Image as PILImage
+from pdf_generator import generate_pdf
+from datetime import datetime
+import uuid
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +235,7 @@ class BatchProcessor:
             stage_pdf = self.queue_manager.create_stage(job_id, StageName.PDF_CREATION.value)
             self.queue_manager.update_stage_status(stage_pdf["id"], StageStatus.PROCESSING)
             
-            pdf_url = await self._create_pdf(job_id, job_data, scene_urls)
+            pdf_url = await self._create_pdf(job_id, job_data, scene_urls, enhanced_images=enhanced_images)
             if not pdf_url:
                 self.queue_manager.update_stage_status(
                     stage_pdf["id"],
@@ -457,7 +462,7 @@ class BatchProcessor:
             stage_pdf = self.queue_manager.create_stage(job_id, StageName.PDF_CREATION.value)
             self.queue_manager.update_stage_status(stage_pdf["id"], StageStatus.PROCESSING)
             
-            pdf_url = await self._create_pdf(job_id, job_data, scene_urls, story_result)
+            pdf_url = await self._create_pdf(job_id, job_data, scene_urls, story_result, enhanced_images=enhanced_images)
             if not pdf_url:
                 self.queue_manager.update_stage_status(
                     stage_pdf["id"],
@@ -767,9 +772,185 @@ class BatchProcessor:
         job_id: int,
         job_data: Dict[str, Any],
         scene_urls: List[str],
-        story_result: Optional[Dict[str, Any]] = None
+        story_result: Optional[Dict[str, Any]] = None,
+        enhanced_images: Optional[List[str]] = None
     ) -> Optional[str]:
-        """Create PDF (M3)"""
-        # Placeholder - implement PDF creation logic
-        return None
+        """
+        Create PDF (M3)
+        
+        For interactive_search: Creates PDF with cover + 4 scenes + back cover
+        For story_adventure: Creates PDF with cover + 5 illustrated pages + audio info + back cover
+        """
+        try:
+            start_time = time.time()
+            logger.info(f"Starting PDF creation for job {job_id}")
+            
+            character_name = job_data.get("character_name", "Character")
+            story_title = job_data.get("story_title") or f"{character_name}'s Adventure"
+            character_image_url = job_data.get("character_image_url")
+            
+            # Determine PDF type based on whether story_result exists
+            if story_result:
+                # Story Adventure format
+                pdf_type = "story_adventure"
+                logger.info(f"Creating Story Adventure PDF with {len(scene_urls)} scenes")
+                
+                # Prepare story pages from story_result
+                story_pages = []
+                pages_data = story_result.get("pages", [])
+                for i, page_data in enumerate(pages_data):
+                    # Use scene URL from scene_urls if available, otherwise from page_data
+                    scene_url = scene_urls[i] if i < len(scene_urls) else (page_data.get("scene") if isinstance(page_data, dict) else None)
+                    page_text = page_data.get("text", "") if isinstance(page_data, dict) else str(page_data)
+                    
+                    story_pages.append({
+                        "text": page_text,
+                        "scene": scene_url
+                    })
+                
+                audio_urls = story_result.get("audio_urls")
+                
+                # Generate PDF
+                pdf_bytes = generate_pdf(
+                    pdf_type=pdf_type,
+                    character_name=character_name,
+                    story_title=story_title,
+                    character_image_url=character_image_url,
+                    story_pages=story_pages,
+                    audio_urls=audio_urls
+                )
+            else:
+                # Interactive Search format
+                pdf_type = "interactive_search"
+                logger.info(f"Creating Interactive Search PDF with {len(scene_urls)} scenes")
+                
+                # For interactive search, we need cover image + 4 scenes
+                # The first enhanced image is typically the cover, or use character_image_url
+                # scene_urls should contain 4 scene URLs
+                all_scene_urls = scene_urls[:4]  # Ensure we have exactly 4 scenes
+                
+                # Use first enhanced image as cover if available, otherwise use character_image_url
+                cover_image_url = character_image_url
+                if enhanced_images and len(enhanced_images) > 0:
+                    cover_image_url = enhanced_images[0]
+                
+                # Generate PDF
+                pdf_bytes = generate_pdf(
+                    pdf_type=pdf_type,
+                    character_name=character_name,
+                    story_title=story_title,
+                    character_image_url=cover_image_url,
+                    scene_urls=all_scene_urls
+                )
+            
+            if not pdf_bytes:
+                logger.error(f"PDF generation failed for job {job_id}")
+                return None
+            
+            # Upload PDF to Supabase storage
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"book_{pdf_type}_{job_id}_{timestamp}_{unique_id}.pdf"
+            
+            logger.info(f"Uploading PDF to Supabase storage: {filename}")
+            pdf_url = await self._upload_pdf_to_storage(pdf_bytes, filename)
+            
+            if not pdf_url:
+                logger.error(f"Failed to upload PDF for job {job_id}")
+                return None
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✅ PDF created and uploaded successfully in {elapsed:.2f} seconds: {pdf_url}")
+            
+            # Ensure PDF creation completes within 30 seconds
+            if elapsed > 30:
+                logger.warning(f"PDF creation took {elapsed:.2f} seconds (exceeded 30s target)")
+            
+            # Update story/book record with PDF URL if book_id is available
+            await self._update_story_with_pdf_url(job_id, pdf_url)
+            
+            return pdf_url
+            
+        except Exception as e:
+            logger.error(f"Error creating PDF for job {job_id}: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None
+    
+    async def _upload_pdf_to_storage(self, pdf_bytes: bytes, filename: str) -> Optional[str]:
+        """Upload PDF to Supabase storage"""
+        try:
+            if not self.supabase:
+                logger.error("Supabase client not available")
+                return None
+            
+            # Upload to 'pdfs' bucket, fallback to 'images' bucket
+            storage_bucket = "pdfs"
+            try:
+                response = self.supabase.storage.from_(storage_bucket).upload(
+                    filename,
+                    pdf_bytes,
+                    {
+                        'content-type': 'application/pdf',
+                        'upsert': 'true'
+                    }
+                )
+            except Exception as e:
+                # Fallback to images bucket if pdfs bucket doesn't exist
+                logger.warning(f"PDF bucket not found, using images bucket: {e}")
+                storage_bucket = "images"
+                response = self.supabase.storage.from_(storage_bucket).upload(
+                    filename,
+                    pdf_bytes,
+                    {
+                        'content-type': 'application/pdf',
+                        'upsert': 'true'
+                    }
+                )
+            
+            if hasattr(response, 'full_path') and response.full_path:
+                public_url = self.supabase.storage.from_(storage_bucket).get_public_url(filename)
+                logger.info(f"✅ PDF uploaded successfully: {public_url}")
+                return public_url
+            else:
+                logger.error(f"Unexpected Supabase response: {response}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error uploading PDF to storage: {e}")
+            return None
+    
+    async def _update_story_with_pdf_url(self, job_id: int, pdf_url: str) -> bool:
+        """Update story/book record with PDF URL"""
+        try:
+            if not self.supabase:
+                logger.warning("Supabase client not available")
+                return False
+            
+            # Get job to find book_id
+            job_response = self.supabase.table("book_generation_jobs").select("book_id").eq("id", job_id).execute()
+            
+            if not job_response.data or len(job_response.data) == 0:
+                logger.warning(f"Job {job_id} not found")
+                return False
+            
+            book_id = job_response.data[0].get("book_id")
+            
+            if not book_id:
+                logger.info(f"Job {job_id} has no book_id, skipping story update")
+                return False
+            
+            # Update story with PDF URL
+            update_response = self.supabase.table("stories").update({"pdf_url": pdf_url}).eq("id", book_id).execute()
+            
+            if update_response.data:
+                logger.info(f"✅ Updated story {book_id} with PDF URL")
+                return True
+            else:
+                logger.warning(f"Failed to update story {book_id} with PDF URL")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error updating story with PDF URL: {e}")
+            return False
 

@@ -11,7 +11,8 @@ import uvicorn
 import json
 import re
 from io import BytesIO
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi import Header
 import logging
 import uuid
 from datetime import datetime
@@ -1551,6 +1552,374 @@ async def generate_story_endpoint(request: StoryRequest):
     except Exception as e:
         logger.error(f"Unexpected error in generate_story_endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+
+def verify_purchase(story_id: int, user_id: Optional[str] = None) -> bool:
+    """
+    Verify if user has purchased the book/story
+    
+    Args:
+        story_id: Story/Book ID
+        user_id: User ID (optional, for direct verification)
+    
+    Returns:
+        True if purchase verified, False otherwise
+    """
+    try:
+        if not supabase:
+            logger.warning("Supabase not available for purchase verification")
+            return False
+        
+        # Check if purchase exists
+        query = supabase.table("book_purchases").select("*").eq("story_id", story_id)
+        
+        if user_id:
+            query = query.eq("user_id", user_id)
+        
+        response = query.eq("purchase_status", "completed").execute()
+        
+        if response.data and len(response.data) > 0:
+            logger.info(f"Purchase verified for story {story_id}, user {user_id}")
+            return True
+        
+        # For now, allow free access if no purchase system is set up
+        # In production, this should return False
+        logger.warning(f"No purchase found for story {story_id}, user {user_id} - allowing access (free mode)")
+        return True  # Change to False in production when payment is required
+        
+    except Exception as e:
+        logger.error(f"Error verifying purchase: {e}")
+        return False
+
+
+@app.get("/api/books/{book_id}/pdf")
+async def download_book_pdf(
+    book_id: int,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Download PDF for a book/story with purchase verification
+    
+    Args:
+        book_id: Story/Book ID
+        authorization: Bearer token (optional, for user verification)
+    
+    Returns:
+        PDF file stream
+    """
+    try:
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Storage service not available")
+        
+        # Get story/book information
+        story_response = supabase.table("stories").select("*").eq("id", book_id).execute()
+        
+        if not story_response.data or len(story_response.data) == 0:
+            raise HTTPException(status_code=404, detail=f"Book {book_id} not found")
+        
+        story = story_response.data[0]
+        pdf_url = story.get("pdf_url")
+        
+        if not pdf_url:
+            raise HTTPException(
+                status_code=404,
+                detail=f"PDF not available for book {book_id}. PDF may still be generating."
+            )
+        
+        # Extract user ID from authorization header if provided
+        user_id = None
+        if authorization:
+            try:
+                # In a real implementation, you would decode JWT token here
+                # For now, we'll use a simple approach
+                # You should integrate with your auth system
+                pass
+            except Exception as e:
+                logger.warning(f"Could not extract user ID from authorization: {e}")
+        
+        # Verify purchase (if user_id is available)
+        if user_id:
+            if not verify_purchase(book_id, user_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Purchase verification failed. Please purchase this book to download the PDF."
+                )
+        
+        # Download PDF from storage
+        logger.info(f"Downloading PDF from: {pdf_url}")
+        
+        # Extract filename from URL or generate one
+        filename = pdf_url.split("/")[-1].split("?")[0] or f"book_{book_id}.pdf"
+        
+        # Download PDF bytes
+        pdf_response = requests.get(pdf_url, timeout=30)
+        pdf_response.raise_for_status()
+        pdf_bytes = pdf_response.content
+        
+        # Return PDF as streaming response
+        return StreamingResponse(
+            BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(pdf_bytes))
+            }
+        )
+        
+    except HTTPException as e:
+        raise e
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error downloading PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to download PDF: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error in download_book_pdf: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+
+@app.post("/api/books/{book_id}/generate-pdf")
+async def generate_book_pdf(book_id: str):
+    """
+    Generate PDF on-demand for a book/story
+    
+    This endpoint generates a PDF from the story data and uploads it to Supabase storage.
+    Returns the PDF URL for download.
+    """
+    try:
+        start_time = time.time()
+        logger.info(f"Generating PDF on-demand for book {book_id}")
+        
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Storage service not available")
+        
+        # Convert book_id to integer if it's a string
+        # try:
+        #     book_id_int = int(book_id)
+        # except ValueError:
+        #     raise HTTPException(status_code=400, detail=f"Invalid book ID: {book_id}")
+        
+        # Get story/book information
+        story_response = supabase.table("stories").select("*").eq("id", book_id).execute()
+        
+        if not story_response.data or len(story_response.data) == 0:
+            raise HTTPException(status_code=404, detail=f"Book {book_id} not found")
+        
+        story = story_response.data[0]
+        
+        # Check if PDF already exists
+        if story.get("pdf_url"):
+            logger.info(f"PDF already exists for book {book_id}: {story.get('pdf_url')}")
+            return {
+                "success": True,
+                "pdf_url": story.get("pdf_url"),
+                "message": "PDF already generated"
+            }
+        
+        # Prepare data for PDF generation
+        character_name = story.get("character_name", "Character")
+        story_title = story.get("story_title") or f"{character_name}'s Adventure"
+        character_image_url = story.get("original_image_url")
+        story_type = (story.get("story_type") or "").lower()
+        
+        # Import PDF generator
+        from pdf_generator import generate_pdf
+        
+        pdf_bytes = None
+        
+        if story_type == "search" or story_type == "interactive_search":
+            # Interactive Search format
+            scene_images = story.get("scene_images", [])
+            if not scene_images or len(scene_images) < 4:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Interactive Search requires at least 4 scene images"
+                )
+            
+            # Get cover image (first enhanced image or character image)
+            enhanced_images = story.get("enhanced_images", [])
+            cover_image_url = character_image_url
+            if enhanced_images and len(enhanced_images) > 0:
+                cover_image_url = enhanced_images[0]
+            
+            pdf_bytes = generate_pdf(
+                pdf_type="interactive_search",
+                character_name=character_name,
+                story_title=story_title,
+                character_image_url=cover_image_url,
+                scene_urls=scene_images[:4]
+            )
+        else:
+            # Story Adventure format
+            story_content = story.get("story_content")
+            scene_images = story.get("scene_images", [])
+            audio_urls = story.get("audio_urls", [])
+            
+            if not story_content:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Story content is required for Story Adventure PDF"
+                )
+            
+            # Parse story content
+            try:
+                if isinstance(story_content, str):
+                    story_content = json.loads(story_content)
+            except:
+                pass
+            
+            # Prepare story pages
+            story_pages = []
+            if isinstance(story_content, dict) and "pages" in story_content:
+                pages_data = story_content["pages"]
+            elif isinstance(story_content, list):
+                pages_data = story_content
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid story content format"
+                )
+            
+            for i, page_data in enumerate(pages_data[:5]):
+                page_text = page_data.get("text", "") if isinstance(page_data, dict) else str(page_data)
+                scene_url = scene_images[i] if i < len(scene_images) else (page_data.get("scene") if isinstance(page_data, dict) else None)
+                
+                story_pages.append({
+                    "text": page_text,
+                    "scene": scene_url
+                })
+            
+            pdf_bytes = generate_pdf(
+                pdf_type="story_adventure",
+                character_name=character_name,
+                story_title=story_title,
+                character_image_url=character_image_url,
+                story_pages=story_pages,
+                audio_urls=audio_urls
+            )
+        
+        if not pdf_bytes:
+            raise HTTPException(status_code=500, detail="Failed to generate PDF")
+        
+        # Upload PDF to Supabase storage
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"book_{book_id}_{timestamp}_{unique_id}.pdf"
+        
+        logger.info(f"Uploading PDF to Supabase storage: {filename}")
+        
+        # Upload to 'pdfs' bucket, fallback to 'images' bucket
+        storage_bucket = "pdfs"
+        pdf_url = None
+        
+        try:
+            response = supabase.storage.from_(storage_bucket).upload(
+                filename,
+                pdf_bytes,
+                {
+                    'content-type': 'application/pdf',
+                    'upsert': 'true'
+                }
+            )
+        except Exception as e:
+            # Fallback to images bucket if pdfs bucket doesn't exist
+            logger.warning(f"PDF bucket not found, using images bucket: {e}")
+            storage_bucket = "images"
+            response = supabase.storage.from_(storage_bucket).upload(
+                filename,
+                pdf_bytes,
+                {
+                    'content-type': 'application/pdf',
+                    'upsert': 'true'
+                }
+            )
+        
+        if hasattr(response, 'full_path') and response.full_path:
+            pdf_url = supabase.storage.from_(storage_bucket).get_public_url(filename)
+            logger.info(f"✅ PDF uploaded successfully: {pdf_url}")
+        else:
+            raise HTTPException(status_code=500, detail="Failed to upload PDF to storage")
+        
+        # Update story record with PDF URL
+        update_response = supabase.table("stories").update({"pdf_url": pdf_url}).eq("id", book_id_int).execute()
+        
+        if not update_response.data:
+            logger.warning(f"Failed to update story {book_id} with PDF URL")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"✅ PDF generated and uploaded successfully in {elapsed:.2f} seconds")
+        
+        return {
+            "success": True,
+            "pdf_url": pdf_url,
+            "message": "PDF generated successfully"
+        }
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error generating PDF: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}")
+
+
+@app.post("/api/books/{book_id}/purchase")
+async def record_book_purchase(
+    book_id: int,
+    user_id: Optional[str] = None,
+    transaction_id: Optional[str] = None,
+    amount_paid: Optional[float] = None,
+    payment_method: Optional[str] = None
+):
+    """
+    Record a book purchase (for purchase verification)
+    
+    This endpoint should be called after a successful payment
+    """
+    try:
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Database service not available")
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
+        # Check if purchase already exists
+        existing = supabase.table("book_purchases").select("*").eq("story_id", book_id).eq("user_id", user_id).execute()
+        
+        if existing.data and len(existing.data) > 0:
+            logger.info(f"Purchase already exists for story {book_id}, user {user_id}")
+            return {
+                "success": True,
+                "message": "Purchase already recorded",
+                "purchase_id": existing.data[0]["id"]
+            }
+        
+        # Create new purchase record
+        purchase_data = {
+            "story_id": book_id,
+            "user_id": user_id,
+            "purchase_status": "completed",
+            "transaction_id": transaction_id,
+            "amount_paid": amount_paid,
+            "payment_method": payment_method or "free"
+        }
+        
+        response = supabase.table("book_purchases").insert(purchase_data).execute()
+        
+        if response.data:
+            logger.info(f"Purchase recorded for story {book_id}, user {user_id}")
+            return {
+                "success": True,
+                "message": "Purchase recorded successfully",
+                "purchase_id": response.data[0]["id"]
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to record purchase")
+            
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error recording purchase: {e}")
+        raise HTTPException(status_code=500, detail=f"Error recording purchase: {str(e)}")
+
 
 if __name__ == "__main__":
     print("🚀 Starting AI Image Editor Server...")

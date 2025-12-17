@@ -8,3 +8,4 @@ supabase
 google-genai
 gtts>=2.5.0
 openai
+reportlab>=4.0.0
