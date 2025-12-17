@@ -410,13 +410,16 @@ def create_simple_scene_pdf(
     Create a simple PDF where each scene image is a full page
     
     Format:
-    - Cover page with title
-    - One full page per scene image
-    - Back cover with branding
+    - Each page contains one full-page scene image
+    - Total pages = number of scene images
     """
     try:
         start_time = time.time()
         logger.info(f"Creating simple scene PDF: {story_title} with {len(scene_urls)} scenes")
+        
+        if not scene_urls or len(scene_urls) == 0:
+            logger.error("No scene URLs provided for PDF generation")
+            return False
         
         # Create PDF canvas
         c = canvas.Canvas(output_buffer, pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
@@ -426,73 +429,42 @@ def create_simple_scene_pdf(
         image_height = PAGE_HEIGHT - (2 * MARGIN)
         
         page_num = 1
-        total_pages = 2 + len(scene_urls)  # Cover + scenes + Back cover
+        total_pages = len(scene_urls)
         
-        # === COVER PAGE ===
-        logger.info("Creating cover page...")
-        c.setFillColor(white)
-        c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-        
-        # Title
-        c.setFillColor(black)
-        c.setFont("Helvetica-Bold", 36)
-        title_y = PAGE_HEIGHT - 3 * inch
-        title_width = c.stringWidth(story_title, "Helvetica-Bold", 36)
-        c.drawString((PAGE_WIDTH - title_width) / 2, title_y, story_title)
-        
-        add_branding_footer(c, page_num, total_pages)
-        c.showPage()
-        page_num += 1
-        
-        # === FULL-PAGE SCENE IMAGES ===
+        # === FULL-PAGE SCENE IMAGES (one image per page) ===
         for i, scene_url in enumerate(scene_urls, 1):
-            logger.info(f"Adding scene {i}/{len(scene_urls)}...")
+            logger.info(f"Adding scene {i}/{len(scene_urls)} (page {page_num}/{total_pages})...")
+            
+            # Clear page with white background
             c.setFillColor(white)
             c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
             
+            # Download and add scene image
             scene_image_data = download_image_from_url(scene_url)
             if scene_image_data:
                 scene_image = resize_image_for_pdf(scene_image_data, image_width, image_height, PDF_DPI)
                 if scene_image:
                     scene_img_reader = ImageReader(scene_image)
+                    # Draw image centered on page
                     c.drawImage(scene_img_reader, MARGIN, MARGIN, width=image_width, height=image_height)
+                    logger.info(f"✅ Successfully added image {i} to page {page_num}")
                 else:
-                    logger.warning(f"Failed to resize scene {i} image")
+                    logger.warning(f"Failed to resize scene {i} image - page {page_num} will be blank")
             else:
-                logger.warning(f"Failed to download scene {i} image from {scene_url}")
+                logger.warning(f"Failed to download scene {i} image from {scene_url} - page {page_num} will be blank")
             
+            # Add branding footer
             add_branding_footer(c, page_num, total_pages)
+            
+            # Move to next page
             c.showPage()
             page_num += 1
-        
-        # === BACK COVER ===
-        logger.info("Creating back cover...")
-        c.setFillColor(white)
-        c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-        
-        # Branding
-        c.setFillColor(BRAND_COLOR)
-        c.setFont("Helvetica-Bold", 32)
-        brand_y = PAGE_HEIGHT - 3 * inch
-        brand_width = c.stringWidth(BRAND_NAME, "Helvetica-Bold", 32)
-        c.drawString((PAGE_WIDTH - brand_width) / 2, brand_y, BRAND_NAME)
-        
-        # Tagline
-        c.setFillColor(HexColor("#666666"))
-        c.setFont("Helvetica", 14)
-        tagline = "Creating magical stories for children"
-        tagline_y = PAGE_HEIGHT - 4.5 * inch
-        tagline_width = c.stringWidth(tagline, "Helvetica", 14)
-        c.drawString((PAGE_WIDTH - tagline_width) / 2, tagline_y, tagline)
-        
-        add_branding_footer(c, page_num, total_pages)
-        c.showPage()
         
         # Save PDF
         c.save()
         
         elapsed = time.time() - start_time
-        logger.info(f"✅ Simple scene PDF created successfully in {elapsed:.2f} seconds")
+        logger.info(f"✅ Simple scene PDF created successfully with {total_pages} pages in {elapsed:.2f} seconds")
         return True
         
     except Exception as e:
