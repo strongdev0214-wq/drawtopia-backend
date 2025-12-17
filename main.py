@@ -1714,86 +1714,27 @@ async def generate_book_pdf(book_id: str):
             }
         
         # Prepare data for PDF generation
-        character_name = story.get("character_name", "Character")
-        story_title = story.get("story_title") or f"{character_name}'s Adventure"
-        character_image_url = story.get("original_image_url")
-        story_type = (story.get("story_type") or "").lower()
+        story_title = story.get("story_title") or "Untitled Story"
+        scene_images = story.get("scene_images", [])
+        
+        if not scene_images or len(scene_images) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="No scene images found. Cannot generate PDF without scene images."
+            )
         
         # Import PDF generator
         from pdf_generator import generate_pdf
         
-        pdf_bytes = None
+        # Generate simple PDF: cover page + one full page per scene image + back cover
+        logger.info(f"Generating PDF with {len(scene_images)} scene images")
         
-        if story_type == "search" or story_type == "interactive_search":
-            # Interactive Search format
-            scene_images = story.get("scene_images", [])
-            if not scene_images or len(scene_images) < 4:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Interactive Search requires at least 4 scene images"
-                )
-            
-            # Get cover image (first enhanced image or character image)
-            enhanced_images = story.get("enhanced_images", [])
-            cover_image_url = character_image_url
-            if enhanced_images and len(enhanced_images) > 0:
-                cover_image_url = enhanced_images[0]
-            
-            pdf_bytes = generate_pdf(
-                pdf_type="interactive_search",
-                character_name=character_name,
-                story_title=story_title,
-                character_image_url=cover_image_url,
-                scene_urls=scene_images[:4]
-            )
-        else:
-            # Story Adventure format
-            story_content = story.get("story_content")
-            scene_images = story.get("scene_images", [])
-            audio_urls = story.get("audio_urls", [])
-            
-            if not story_content:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Story content is required for Story Adventure PDF"
-                )
-            
-            # Parse story content
-            try:
-                if isinstance(story_content, str):
-                    story_content = json.loads(story_content)
-            except:
-                pass
-            
-            # Prepare story pages
-            story_pages = []
-            if isinstance(story_content, dict) and "pages" in story_content:
-                pages_data = story_content["pages"]
-            elif isinstance(story_content, list):
-                pages_data = story_content
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid story content format"
-                )
-            
-            for i, page_data in enumerate(pages_data[:5]):
-                page_text = page_data.get("text", "") if isinstance(page_data, dict) else str(page_data)
-                scene_url = scene_images[i] if i < len(scene_images) else (page_data.get("scene") if isinstance(page_data, dict) else None)
-                
-                story_pages.append({
-                    "text": page_text,
-                    "scene": scene_url
-                })
-            
-            pdf_bytes = generate_pdf(
-                pdf_type="story_adventure",
-                character_name=character_name,
-                story_title=story_title,
-                character_image_url=character_image_url,
-                story_pages=story_pages,
-                audio_urls=audio_urls
-            )
+        pdf_bytes = generate_pdf(
+            pdf_type="simple_scenes",
+            character_name="",  # Not needed for simple format
+            story_title=story_title,
+            scene_urls=scene_images  # All scene images, each becomes one page
+        )
         
         if not pdf_bytes:
             raise HTTPException(status_code=500, detail="Failed to generate PDF")

@@ -401,8 +401,109 @@ def create_story_adventure_pdf(
         return False
 
 
+def create_simple_scene_pdf(
+    story_title: str,
+    scene_urls: List[str],
+    output_buffer: BytesIO
+) -> bool:
+    """
+    Create a simple PDF where each scene image is a full page
+    
+    Format:
+    - Cover page with title
+    - One full page per scene image
+    - Back cover with branding
+    """
+    try:
+        start_time = time.time()
+        logger.info(f"Creating simple scene PDF: {story_title} with {len(scene_urls)} scenes")
+        
+        # Create PDF canvas
+        c = canvas.Canvas(output_buffer, pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
+        
+        # Calculate image dimensions (full page minus margins)
+        image_width = PAGE_WIDTH - (2 * MARGIN)
+        image_height = PAGE_HEIGHT - (2 * MARGIN)
+        
+        page_num = 1
+        total_pages = 2 + len(scene_urls)  # Cover + scenes + Back cover
+        
+        # === COVER PAGE ===
+        logger.info("Creating cover page...")
+        c.setFillColor(white)
+        c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+        
+        # Title
+        c.setFillColor(black)
+        c.setFont("Helvetica-Bold", 36)
+        title_y = PAGE_HEIGHT - 3 * inch
+        title_width = c.stringWidth(story_title, "Helvetica-Bold", 36)
+        c.drawString((PAGE_WIDTH - title_width) / 2, title_y, story_title)
+        
+        add_branding_footer(c, page_num, total_pages)
+        c.showPage()
+        page_num += 1
+        
+        # === FULL-PAGE SCENE IMAGES ===
+        for i, scene_url in enumerate(scene_urls, 1):
+            logger.info(f"Adding scene {i}/{len(scene_urls)}...")
+            c.setFillColor(white)
+            c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+            
+            scene_image_data = download_image_from_url(scene_url)
+            if scene_image_data:
+                scene_image = resize_image_for_pdf(scene_image_data, image_width, image_height, PDF_DPI)
+                if scene_image:
+                    scene_img_reader = ImageReader(scene_image)
+                    c.drawImage(scene_img_reader, MARGIN, MARGIN, width=image_width, height=image_height)
+                else:
+                    logger.warning(f"Failed to resize scene {i} image")
+            else:
+                logger.warning(f"Failed to download scene {i} image from {scene_url}")
+            
+            add_branding_footer(c, page_num, total_pages)
+            c.showPage()
+            page_num += 1
+        
+        # === BACK COVER ===
+        logger.info("Creating back cover...")
+        c.setFillColor(white)
+        c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+        
+        # Branding
+        c.setFillColor(BRAND_COLOR)
+        c.setFont("Helvetica-Bold", 32)
+        brand_y = PAGE_HEIGHT - 3 * inch
+        brand_width = c.stringWidth(BRAND_NAME, "Helvetica-Bold", 32)
+        c.drawString((PAGE_WIDTH - brand_width) / 2, brand_y, BRAND_NAME)
+        
+        # Tagline
+        c.setFillColor(HexColor("#666666"))
+        c.setFont("Helvetica", 14)
+        tagline = "Creating magical stories for children"
+        tagline_y = PAGE_HEIGHT - 4.5 * inch
+        tagline_width = c.stringWidth(tagline, "Helvetica", 14)
+        c.drawString((PAGE_WIDTH - tagline_width) / 2, tagline_y, tagline)
+        
+        add_branding_footer(c, page_num, total_pages)
+        c.showPage()
+        
+        # Save PDF
+        c.save()
+        
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Simple scene PDF created successfully in {elapsed:.2f} seconds")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating simple scene PDF: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        return False
+
+
 def generate_pdf(
-    pdf_type: str,  # "interactive_search" or "story_adventure"
+    pdf_type: str,  # "interactive_search" or "story_adventure" or "simple_scenes"
     character_name: str,
     story_title: str,
     character_image_url: Optional[str] = None,
@@ -419,7 +520,17 @@ def generate_pdf(
     try:
         output_buffer = BytesIO()
         
-        if pdf_type == "interactive_search":
+        if pdf_type == "simple_scenes":
+            if not scene_urls:
+                logger.error("scene_urls required for simple_scenes PDF")
+                return None
+            
+            success = create_simple_scene_pdf(
+                story_title=story_title,
+                scene_urls=scene_urls,
+                output_buffer=output_buffer
+            )
+        elif pdf_type == "interactive_search":
             if not scene_urls:
                 logger.error("scene_urls required for interactive_search PDF")
                 return None
