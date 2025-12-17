@@ -410,61 +410,67 @@ def create_simple_scene_pdf(
     Create a simple PDF where each scene image is a full page
     
     Format:
-    - Each page contains one full-page scene image
-    - Total pages = number of scene images
+    - Each image on its own page with 1 inch margins
+    - A4 pagesize
+    - preserveAspectRatio=True
     """
     try:
         start_time = time.time()
         logger.info(f"Creating simple scene PDF: {story_title} with {len(scene_urls)} scenes")
         
-        if not scene_urls or len(scene_urls) == 0:
-            logger.error("No scene URLs provided for PDF generation")
-            return False
+        # Create PDF canvas with A4 pagesize
+        c = canvas.Canvas(output_buffer, pagesize=A4)
+        width, height = A4
         
-        # Create PDF canvas
-        c = canvas.Canvas(output_buffer, pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
+        # Use 1 inch margins as specified
+        margin = 1 * inch
+        image_width = width - (2 * margin)
+        image_height = height - (2 * margin)
         
-        # Calculate image dimensions (full page minus margins)
-        image_width = PAGE_WIDTH - (2 * MARGIN)
-        image_height = PAGE_HEIGHT - (2 * MARGIN)
-        
-        page_num = 1
-        total_pages = len(scene_urls)
-        
-        # === FULL-PAGE SCENE IMAGES (one image per page) ===
+        # === ONE FULL PAGE PER SCENE IMAGE ===
         for i, scene_url in enumerate(scene_urls, 1):
-            logger.info(f"Adding scene {i}/{len(scene_urls)} (page {page_num}/{total_pages})...")
+            logger.info(f"Adding scene {i}/{len(scene_urls)}...")
             
-            # Clear page with white background
-            c.setFillColor(white)
-            c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-            
-            # Download and add scene image
             scene_image_data = download_image_from_url(scene_url)
             if scene_image_data:
-                scene_image = resize_image_for_pdf(scene_image_data, image_width, image_height, PDF_DPI)
-                if scene_image:
-                    scene_img_reader = ImageReader(scene_image)
-                    # Draw image centered on page
-                    c.drawImage(scene_img_reader, MARGIN, MARGIN, width=image_width, height=image_height)
-                    logger.info(f"✅ Successfully added image {i} to page {page_num}")
-                else:
-                    logger.warning(f"Failed to resize scene {i} image - page {page_num} will be blank")
+                # Download and prepare image
+                try:
+                    image = PILImage.open(BytesIO(scene_image_data))
+                    
+                    # Convert to RGB if necessary
+                    if image.mode in ('RGBA', 'LA', 'P'):
+                        background = PILImage.new('RGB', image.size, (255, 255, 255))
+                        if image.mode == 'P':
+                            image = image.convert('RGBA')
+                        if image.mode in ('RGBA', 'LA'):
+                            background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+                            image = background
+                    elif image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    
+                    img_reader = ImageReader(image)
+                    
+                    # Draw image with 1 inch margins and preserveAspectRatio
+                    c.drawImage(
+                        img_reader,
+                        x=margin,
+                        y=margin,
+                        width=image_width,
+                        height=image_height,
+                        preserveAspectRatio=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to process scene {i} image: {e}")
             else:
-                logger.warning(f"Failed to download scene {i} image from {scene_url} - page {page_num} will be blank")
+                logger.warning(f"Failed to download scene {i} image from {scene_url}")
             
-            # Add branding footer
-            add_branding_footer(c, page_num, total_pages)
-            
-            # Move to next page
             c.showPage()
-            page_num += 1
         
         # Save PDF
         c.save()
         
         elapsed = time.time() - start_time
-        logger.info(f"✅ Simple scene PDF created successfully with {total_pages} pages in {elapsed:.2f} seconds")
+        logger.info(f"✅ Simple scene PDF created successfully in {elapsed:.2f} seconds")
         return True
         
     except Exception as e:
