@@ -27,6 +27,7 @@ from typing import List, Optional, Dict, Any
 from queue_manager import QueueManager
 from batch_processor import BatchProcessor
 from validation_utils import ConsistencyValidationResult
+from audio_generator import AudioGenerator
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -258,6 +259,7 @@ class StoryRequest(BaseModel):
 class StoryPage(BaseModel):
     text: str
     scene: Optional[HttpUrl] = None  # URL to the generated scene image
+    audio: Optional[HttpUrl] = None  # URL to the generated audio file
     consistency_validation: Optional[ConsistencyValidationResult] = None
     
     class Config:
@@ -282,6 +284,7 @@ class StoryResponse(BaseModel):
     word_count: int
     page_word_counts: List[int]
     consistency_summary: Optional[Dict[str, Any]] = None  # Overall validation summary
+    audio_urls: Optional[List[Optional[str]]] = None  # List of audio URLs (one per page, None if failed)
     
     class Config:
         schema_extra = {
@@ -1394,6 +1397,105 @@ async def generate_story_endpoint(request: StoryRequest):
         
         logger.info("All scene images generated successfully")
         
+        # Generate audio for all story pages
+        logger.info("Generating audio for story pages...")
+        audio_urls = []
+        audio_generator = None
+        
+        if supabase:
+            try:
+                audio_generator = AudioGenerator()
+                if audio_generator.available:
+                    # Generate audio for all pages
+                    audio_data_list = audio_generator.generate_audio_for_story(
+                        story_pages=story_result['pages'],
+                        age_group=request.age_group,
+                        timeout_per_page=60
+                    )
+                    
+                    # Upload audio files to Supabase storage
+                    for i, audio_data in enumerate(audio_data_list, 1):
+                        if audio_data is None:
+                            logger.warning(f"⚠️ No audio generated for page {i}, skipping upload")
+                            audio_urls.append(None)
+                            continue
+                        
+                        # Generate unique filename
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        unique_id = str(uuid.uuid4())[:8]
+                        filename = f"story_audio_page{i}_{timestamp}_{unique_id}.mp3"
+                        
+                        # Upload to Supabase storage (try audio bucket first, fallback to images)
+                        storage_bucket = "audio"
+                        audio_url = None
+                        
+                        try:
+                            # Try audio bucket first
+                            try:
+                                response = supabase.storage.from_(storage_bucket).upload(
+                                    filename,
+                                    audio_data,
+                                    {
+                                        'content-type': 'audio/mpeg',
+                                        'upsert': 'true'
+                                    }
+                                )
+                            except Exception as e:
+                                # If audio bucket doesn't exist, use images bucket
+                                logger.warning(f"Audio bucket not found, using images bucket: {e}")
+                                storage_bucket = "images"
+                                response = supabase.storage.from_(storage_bucket).upload(
+                                    filename,
+                                    audio_data,
+                                    {
+                                        'content-type': 'audio/mpeg',
+                                        'upsert': 'true'
+                                    }
+                                )
+                            
+                            if hasattr(response, 'full_path') and response.full_path:
+                                audio_url = supabase.storage.from_(storage_bucket).get_public_url(filename)
+                                audio_urls.append(audio_url)
+                                logger.info(f"✅ Uploaded audio for page {i}: {audio_url}")
+                            else:
+                                logger.error(f"❌ Failed to upload audio for page {i}: Unexpected response")
+                                audio_urls.append(None)
+                        except Exception as e:
+                            logger.error(f"❌ Error uploading audio for page {i} to Supabase: {e}")
+                            audio_urls.append(None)
+                        
+                    successful_uploads = sum(1 for url in audio_urls if url is not None)
+                    if successful_uploads > 0:
+                        logger.info(f"✅ Generated and uploaded {successful_uploads}/5 audio files")
+                    else:
+                        logger.warning("⚠️ Failed to generate/upload any audio files")
+                    
+                    # Update StoryPage objects with audio URLs (recreate since Pydantic models are immutable)
+                    updated_story_pages = []
+                    for idx, page in enumerate(story_pages):
+                        audio_http_url = None
+                        if idx < len(audio_urls) and audio_urls[idx]:
+                            try:
+                                audio_http_url = HttpUrl(audio_urls[idx])
+                            except Exception as e:
+                                logger.warning(f"Failed to create HttpUrl for audio on page {idx + 1}: {e}")
+                        
+                        updated_story_pages.append(StoryPage(
+                            text=page.text,
+                            scene=page.scene,
+                            audio=audio_http_url,
+                            consistency_validation=page.consistency_validation
+                        ))
+                    story_pages = updated_story_pages
+                else:
+                    logger.warning("⚠️ Audio generator not available. Install: pip install gtts>=2.5.0")
+            except Exception as e:
+                logger.error(f"Error during audio generation: {e}")
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.warning("⚠️ Supabase not configured, skipping audio generation")
+        
         # Create consistency summary
         consistency_summary = None
         if consistency_results:
@@ -1436,7 +1538,8 @@ async def generate_story_endpoint(request: StoryRequest):
             full_story=story_result['full_story'],
             word_count=story_result['word_count'],
             page_word_counts=story_result['page_word_counts'],
-            consistency_summary=consistency_summary
+            consistency_summary=consistency_summary,
+            audio_urls=audio_urls if audio_urls else None
         )
         
     except ValueError as e:
