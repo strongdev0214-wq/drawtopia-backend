@@ -1696,13 +1696,6 @@ async def generate_book_pdf(book_id: str):
         if not supabase:
             raise HTTPException(status_code=500, detail="Storage service not available")
         
-        # Convert book_id to integer if it's a string
-        # try:
-        #     book_id_int = int(book_id)
-        # except ValueError:
-        #     raise HTTPException(status_code=400, detail=f"Invalid book ID: {book_id}")
-        
-        # Get story/book information
         # Try uid first, then fallback to id
         story_response = supabase.table("stories").select("*").eq("uid", book_id).execute()
         
@@ -1732,11 +1725,7 @@ async def generate_book_pdf(book_id: str):
         
         # Prepare data for PDF generation
         story_title = story.get("story_title") or "Untitled Story"
-        story_cover = story.get("story_cover")  # Cover image URL
-        scene_images = story.get("scene_images", [])
-        
-        # Limit to 4 scene images as requested
-        scene_images = scene_images[:4] if scene_images else []
+        scene_images = story.get("scene_images")
         
         if not scene_images or len(scene_images) == 0:
             raise HTTPException(
@@ -1747,16 +1736,14 @@ async def generate_book_pdf(book_id: str):
         # Import PDF generator
         from pdf_generator import generate_pdf
         
-        # Generate PDF with cover image + 4 scene images
-        logger.info(f"Generating PDF with cover image and {len(scene_images)} scene images")
-        logger.info(f"Cover image URL: {story_cover}")
+        # Generate simple PDF: cover page + one full page per scene image + back cover
+        logger.info(f"Generating PDF with {len(scene_images)} scene images")
         
         pdf_bytes = generate_pdf(
-            pdf_type="cover_and_scenes",
-            character_name="",  # Not needed for this format
+            pdf_type="simple_scenes",
+            character_name="",  # Not needed for simple format
             story_title=story_title,
-            scene_urls=scene_images,  # First 4 scene images
-            cover_image_url=story_cover  # Story cover image
+            scene_urls=scene_images  # All scene images, each becomes one page
         )
         
         if not pdf_bytes:

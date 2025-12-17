@@ -502,112 +502,14 @@ def create_simple_scene_pdf(
         return False
 
 
-def create_cover_and_scenes_pdf(
-    story_title: str,
-    cover_image_url: Optional[str],
-    scene_urls: List[str],
-    output_buffer: BytesIO
-) -> bool:
-    """
-    Create a PDF with cover image page and scene image pages
-    
-    Format:
-    - Cover image page (full page)
-    - Up to 4 full-page scene images
-    """
-    try:
-        start_time = time.time()
-        logger.info(f"Creating cover and scenes PDF: {story_title} with cover image and {len(scene_urls)} scenes")
-        
-        # Limit to 4 scenes
-        scene_urls = scene_urls[:4]
-        
-        # Create PDF canvas
-        c = canvas.Canvas(output_buffer, pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
-        
-        # Calculate image dimensions (full page minus margins)
-        image_width = PAGE_WIDTH - (2 * MARGIN)
-        image_height = PAGE_HEIGHT - (2 * MARGIN)
-        
-        page_num = 1
-        total_pages = 1 + len(scene_urls)  # Cover + scenes (no back cover as requested)
-        
-        # === COVER IMAGE PAGE ===
-        if cover_image_url:
-            logger.info("Adding cover image page...")
-            c.setFillColor(white)
-            c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-            
-            cover_image_data = download_image_from_url(cover_image_url)
-            if cover_image_data:
-                cover_image = resize_image_for_pdf(cover_image_data, image_width, image_height, PDF_DPI)
-                if cover_image:
-                    cover_img_reader = ImageReader(cover_image)
-                    c.drawImage(cover_img_reader, MARGIN, MARGIN, width=image_width, height=image_height)
-                    logger.info("✅ Cover image added successfully")
-                else:
-                    logger.warning("Failed to resize cover image")
-            else:
-                logger.warning(f"Failed to download cover image from {cover_image_url}")
-        else:
-            logger.warning("No cover image URL provided, creating blank cover page")
-            c.setFillColor(white)
-            c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-            # Title as fallback
-            c.setFillColor(black)
-            c.setFont("Helvetica-Bold", 36)
-            title_y = PAGE_HEIGHT - 3 * inch
-            title_width = c.stringWidth(story_title, "Helvetica-Bold", 36)
-            c.drawString((PAGE_WIDTH - title_width) / 2, title_y, story_title)
-        
-        add_branding_footer(c, page_num, total_pages)
-        c.showPage()
-        page_num += 1
-        
-        # === SCENE IMAGE PAGES (up to 4) ===
-        for i, scene_url in enumerate(scene_urls, 1):
-            logger.info(f"Adding scene {i}/{len(scene_urls)}...")
-            c.setFillColor(white)
-            c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
-            
-            scene_image_data = download_image_from_url(scene_url)
-            if scene_image_data:
-                scene_image = resize_image_for_pdf(scene_image_data, image_width, image_height, PDF_DPI)
-                if scene_image:
-                    scene_img_reader = ImageReader(scene_image)
-                    c.drawImage(scene_img_reader, MARGIN, MARGIN, width=image_width, height=image_height)
-                else:
-                    logger.warning(f"Failed to resize scene {i} image")
-            else:
-                logger.warning(f"Failed to download scene {i} image from {scene_url}")
-            
-            add_branding_footer(c, page_num, total_pages)
-            c.showPage()
-            page_num += 1
-        
-        # Save PDF
-        c.save()
-        
-        elapsed = time.time() - start_time
-        logger.info(f"✅ Cover and scenes PDF created successfully in {elapsed:.2f} seconds ({total_pages} pages)")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error creating cover and scenes PDF: {e}")
-        import traceback
-        logger.debug(f"Traceback: {traceback.format_exc()}")
-        return False
-
-
 def generate_pdf(
-    pdf_type: str,  # "interactive_search" or "story_adventure" or "simple_scenes" or "cover_and_scenes"
+    pdf_type: str,  # "interactive_search" or "story_adventure" or "simple_scenes"
     character_name: str,
     story_title: str,
     character_image_url: Optional[str] = None,
     scene_urls: Optional[List[str]] = None,
     story_pages: Optional[List[Dict[str, Any]]] = None,
-    audio_urls: Optional[List[Optional[str]]] = None,
-    cover_image_url: Optional[str] = None
+    audio_urls: Optional[List[Optional[str]]] = None
 ) -> Optional[bytes]:
     """
     Main function to generate PDF based on type
@@ -651,17 +553,6 @@ def generate_pdf(
                 character_image_url=character_image_url,
                 story_pages=story_pages,
                 audio_urls=audio_urls,
-                output_buffer=output_buffer
-            )
-        elif pdf_type == "cover_and_scenes":
-            if not scene_urls:
-                logger.error("scene_urls required for cover_and_scenes PDF")
-                return None
-            
-            success = create_cover_and_scenes_pdf(
-                story_title=story_title,
-                cover_image_url=cover_image_url,
-                scene_urls=scene_urls,
                 output_buffer=output_buffer
             )
         else:
