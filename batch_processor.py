@@ -416,24 +416,42 @@ class BatchProcessor:
                         result_data=result
                     )
             
-            # Stage 6: Audio Generation (M3)
+            # Stage 6: Audio Generation (Story Adventure only)
             stage_audio = self.queue_manager.create_stage(job_id, StageName.AUDIO_GENERATION.value)
             self.queue_manager.update_stage_status(stage_audio["id"], StageStatus.PROCESSING)
             
-            audio_url = await self._generate_audio(job_id, story_result)
-            if not audio_url:
+            audio_result = await self._generate_audio(job_id, story_result, job_data)
+            if not audio_result:
                 self.queue_manager.update_stage_status(
                     stage_audio["id"],
-                    StageStatus.SKIPPED,
-                    error_message="Audio generation not implemented (M3)"
+                    StageStatus.FAILED,
+                    error_message="Audio generation failed"
                 )
+                # Don't fail the entire job if audio fails, just log it
+                logger.warning("Audio generation failed, but continuing with story generation")
             else:
                 self.queue_manager.update_stage_status(
                     stage_audio["id"],
                     StageStatus.COMPLETED,
                     progress_percentage=100,
-                    result_data={"audio_url": audio_url}
+                    result_data=audio_result
                 )
+                # Store audio URLs in story_result for later use
+                # audio_urls is a list of 5 URLs (one per page) or None for failed pages
+                # When saving the story, include audioUrl in each page object:
+                # story_content = {
+                #   "pages": [
+                #     {
+                #       "pageNumber": 1,
+                #       "text": "...",
+                #       "sceneImage": "...",
+                #       "audioUrl": audio_urls[0]  # or null if None
+                #     },
+                #     ...
+                #   ]
+                # }
+                if "audio_urls" in audio_result:
+                    story_result["audio_urls"] = audio_result["audio_urls"]
             
             # Stage 7: PDF Creation (M3)
             stage_pdf = self.queue_manager.create_stage(job_id, StageName.PDF_CREATION.value)
@@ -453,6 +471,21 @@ class BatchProcessor:
                 StageStatus.COMPLETED,
                 progress_percentage=100,
                 result_data={"pdf_url": pdf_url}
+            )
+            
+            # Store final result data with all generated content including audio URLs
+            final_result = {
+                "story_result": story_result,
+                "scene_urls": scene_urls,
+                "audio_urls": story_result.get("audio_urls", []),
+                "pdf_url": pdf_url
+            }
+            
+            # Update job with final result data (audio URLs will be available for story saving)
+            self.queue_manager.update_job_status(
+                job_id,
+                JobStatus.COMPLETED,
+                result_data=final_result
             )
             
             return True
@@ -613,10 +646,121 @@ class BatchProcessor:
                 "error": str(e)
             }
     
-    async def _generate_audio(self, job_id: int, story_result: Dict[str, Any]) -> Optional[str]:
-        """Generate audio for story (M3)"""
-        # Placeholder - implement audio generation logic
-        return None
+    async def _generate_audio(
+        self,
+        job_id: int,
+        story_result: Dict[str, Any],
+        job_data: Dict[str, Any]
+    ) -> Optional[Dict[str, List[str]]]:
+        """
+        Generate audio for all story pages using Google Cloud Text-to-Speech
+        
+        Args:
+            job_id: Job ID
+            story_result: Story generation result with pages
+            job_data: Job data containing age_group
+        
+        Returns:
+            Dictionary with audio_urls list or None if failed
+        """
+        try:
+            from audio_generator import AudioGenerator
+            from datetime import datetime
+            import uuid
+            
+            # Only generate audio for Story Adventure (not Interactive Search)
+            # This check is already done at the job level, but keeping for safety
+            if job_data.get("job_type") == "interactive_search":
+                logger.info("Skipping audio generation for Interactive Search")
+                return None
+            
+            age_group = job_data.get("age_group", "7-10")
+            story_pages = story_result.get("pages", [])
+            
+            if not story_pages or len(story_pages) != 5:
+                logger.error(f"Invalid story pages: expected 5, got {len(story_pages) if story_pages else 0}")
+                return None
+            
+            # Initialize audio generator (gTTS - no API keys required)
+            audio_generator = AudioGenerator()
+            if not audio_generator.available:
+                logger.error("Audio generator not available. Install: pip install gtts>=2.5.0")
+                return None
+            
+            # Generate audio for all pages
+            logger.info(f"Generating audio for {len(story_pages)} pages (age group: {age_group})...")
+            audio_data_list = audio_generator.generate_audio_for_story(
+                story_pages=story_pages,
+                age_group=age_group,
+                timeout_per_page=60
+            )
+            
+            # Upload audio files to Supabase storage
+            audio_urls = []
+            
+            for i, audio_data in enumerate(audio_data_list, 1):
+                if audio_data is None:
+                    logger.warning(f"⚠️ No audio generated for page {i}, skipping upload")
+                    audio_urls.append(None)
+                    continue
+                
+                # Generate unique filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                unique_id = str(uuid.uuid4())[:8]
+                filename = f"story_audio_page{i}_{timestamp}_{unique_id}.mp3"
+                
+                # Upload to Supabase storage
+                # Create 'audio' bucket if it doesn't exist, or use 'images' bucket
+                storage_bucket = "audio"  # You may need to create this bucket in Supabase
+                try:
+                    # Try audio bucket first, fallback to images bucket
+                    try:
+                        response = self.supabase.storage.from_(storage_bucket).upload(
+                            filename,
+                            audio_data,
+                            {
+                                'content-type': 'audio/mpeg',
+                                'upsert': 'true'
+                            }
+                        )
+                    except Exception as e:
+                        # If audio bucket doesn't exist, use images bucket
+                        logger.warning(f"Audio bucket not found, using images bucket: {e}")
+                        storage_bucket = "images"
+                        response = self.supabase.storage.from_(storage_bucket).upload(
+                            filename,
+                            audio_data,
+                            {
+                                'content-type': 'audio/mpeg',
+                                'upsert': 'true'
+                            }
+                        )
+                    
+                    if hasattr(response, 'full_path') and response.full_path:
+                        public_url = self.supabase.storage.from_(storage_bucket).get_public_url(filename)
+                        audio_urls.append(public_url)
+                        logger.info(f"✅ Uploaded audio for page {i}: {public_url}")
+                    else:
+                        logger.error(f"❌ Failed to upload audio for page {i}: Unexpected response")
+                        audio_urls.append(None)
+                except Exception as e:
+                    logger.error(f"❌ Error uploading audio for page {i} to Supabase: {e}")
+                    audio_urls.append(None)
+            
+            # Return audio URLs
+            successful_uploads = sum(1 for url in audio_urls if url is not None)
+            if successful_uploads > 0:
+                logger.info(f"✅ Generated and uploaded {successful_uploads}/5 audio files")
+                return {"audio_urls": audio_urls}
+            else:
+                logger.error("❌ Failed to generate/upload any audio files")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error generating audio: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None
     
     async def _create_pdf(
         self,
