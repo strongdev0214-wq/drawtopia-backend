@@ -551,44 +551,43 @@ def create_book_pdf_with_cover(
         # === PAGES 2-6: SCENE IMAGES (up to 5 images) ===
         # Limit to 5 scene images to make 6 pages total (1 cover + 5 scenes)
         scene_urls_to_use = scene_urls[:5]
-
-        print(f"scene_urls_to_use: {scene_urls_to_use}")
         
         for i, scene_url in enumerate(scene_urls_to_use, 1):
-            logger.info(f"Adding scene {i}/{len(scene_urls_to_use)}...")
-            
-            scene_image_data = download_image_from_url(scene_url)
-            if scene_image_data:
-                # Download and prepare image
-                try:
-                    image = PILImage.open(BytesIO(scene_image_data))
-                    
-                    # Convert to RGB if necessary
-                    if image.mode in ('RGBA', 'LA', 'P'):
-                        background = PILImage.new('RGB', image.size, (255, 255, 255))
-                        if image.mode == 'P':
-                            image = image.convert('RGBA')
-                        if image.mode in ('RGBA', 'LA'):
-                            background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
-                            image = background
-                    elif image.mode != 'RGB':
-                        image = image.convert('RGB')
-                    
-                    img_reader = ImageReader(image)
-                    
-                    # Draw image with 1 inch margins and preserveAspectRatio
-                    c.drawImage(
-                        img_reader,
-                        x=margin,
-                        y=margin,
-                        width=image_width,
-                        height=image_height,
-                        preserveAspectRatio=True
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to process scene {i} image: {e}")
+            if scene_url:
+                logger.info(f"Adding scene {i}/{len(scene_urls_to_use)}...")
+                scene_image_data = download_image_from_url(scene_url)
+                if scene_image_data:
+                    try:
+                        image = PILImage.open(BytesIO(scene_image_data))
+                        
+                        # Convert to RGB if necessary
+                        if image.mode in ('RGBA', 'LA', 'P'):
+                            background = PILImage.new('RGB', image.size, (255, 255, 255))
+                            if image.mode == 'P':
+                                image = image.convert('RGBA')
+                            if image.mode in ('RGBA', 'LA'):
+                                background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+                                image = background
+                        elif image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        
+                        img_reader = ImageReader(image)
+                        
+                        # Draw scene image with 1 inch margins and preserveAspectRatio
+                        c.drawImage(
+                            img_reader,
+                            x=margin,
+                            y=margin,
+                            width=image_width,
+                            height=image_height,
+                            preserveAspectRatio=True
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to process scene {i} image: {e}")
+                else:
+                    logger.warning(f"Failed to download scene {i} image from {scene_url}")
             else:
-                logger.warning(f"Failed to download scene {i} image from {scene_url}")
+                logger.warning(f"No scene URL provided for scene {i}, skipping scene page")
             
             c.showPage()
         
