@@ -1726,7 +1726,7 @@ async def generate_book_pdf(book_id: str):
         # Prepare data for PDF generation
         story_title = story.get("story_title") or "Untitled Story"
         story_cover = story.get("story_cover")
-        scene_images = story.get("scene_images") or []
+        scene_images = story.get("scene_images")
         
         # Check if we have at least cover or scene images
         if not story_cover and (not scene_images or len(scene_images) == 0):
