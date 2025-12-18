@@ -1734,20 +1734,23 @@ async def generate_book_pdf(book_id: str):
             )
         
         # Import PDF generator
-        from pdf_generator import generate_pdf
+        from pdf_generator import create_simple_scene_pdf
+        from io import BytesIO
         
-        # Generate simple PDF: cover page + one full page per scene image + back cover
+        # Generate simple PDF: one full page per scene image
         logger.info(f"Generating PDF with {len(scene_images)} scene images")
         
-        pdf_bytes = generate_pdf(
-            pdf_type="simple_scenes",
-            character_name="",  # Not needed for simple format
+        output_buffer = BytesIO()
+        success = create_simple_scene_pdf(
             story_title=story_title,
-            scene_urls=scene_images  # All scene images, each becomes one page
+            scene_urls=scene_images,  # All scene images, each becomes one page
+            output_buffer=output_buffer
         )
         
-        if not pdf_bytes:
+        if not success:
             raise HTTPException(status_code=500, detail="Failed to generate PDF")
+        
+        pdf_bytes = output_buffer.getvalue()
         
         # Upload PDF to Supabase storage
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
