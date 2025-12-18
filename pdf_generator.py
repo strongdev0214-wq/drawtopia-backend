@@ -551,6 +551,8 @@ def create_book_pdf_with_cover(
         # === PAGES 2-6: SCENE IMAGES (up to 5 images) ===
         # Limit to 5 scene images to make 6 pages total (1 cover + 5 scenes)
         scene_urls_to_use = scene_urls[:5]
+
+        print(f"scene_urls_to_use: {scene_urls_to_use}")
         
         for i, scene_url in enumerate(scene_urls_to_use, 1):
             logger.info(f"Adding scene {i}/{len(scene_urls_to_use)}...")
