@@ -1725,25 +1725,28 @@ async def generate_book_pdf(book_id: str):
         
         # Prepare data for PDF generation
         story_title = story.get("story_title") or "Untitled Story"
-        scene_images = story.get("scene_images")
+        story_cover = story.get("story_cover")
+        scene_images = story.get("scene_images") or []
         
-        if not scene_images or len(scene_images) == 0:
+        # Check if we have at least cover or scene images
+        if not story_cover and (not scene_images or len(scene_images) == 0):
             raise HTTPException(
                 status_code=400,
-                detail="No scene images found. Cannot generate PDF without scene images."
+                detail="No cover image or scene images found. Cannot generate PDF without images."
             )
         
         # Import PDF generator
-        from pdf_generator import create_simple_scene_pdf
+        from pdf_generator import create_book_pdf_with_cover
         from io import BytesIO
         
-        # Generate simple PDF: one full page per scene image
-        logger.info(f"Generating PDF with {len(scene_images)} scene images")
+        # Generate 6-page PDF: cover + up to 5 scene images
+        logger.info(f"Generating PDF with cover and {len(scene_images)} scene images")
         
         output_buffer = BytesIO()
-        success = create_simple_scene_pdf(
+        success = create_book_pdf_with_cover(
             story_title=story_title,
-            scene_urls=scene_images,  # All scene images, each becomes one page
+            story_cover_url=story_cover,
+            scene_urls=scene_images,  # Up to 5 scene images will be used
             output_buffer=output_buffer
         )
         
