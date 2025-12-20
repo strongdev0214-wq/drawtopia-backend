@@ -1266,6 +1266,276 @@ async def get_book_status(book_id: int):
         logger.error(f"Error getting job status: {e}")
         raise HTTPException(status_code=500, detail=f"Error getting job status: {str(e)}")
 
+@app.get("/api/books/")
+async def list_all_books(parent_id: Optional[str] = None):
+    """
+    Get all story data from the stories table
+    
+    Args:
+        parent_id: Optional parent user ID to filter stories by parent's children
+    
+    Returns:
+        List of all story/book data, optionally filtered by parent
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        # If parent_id is provided, filter by parent's children
+        if parent_id:
+            # First, get all child profile IDs for this parent
+            child_profiles_response = supabase.table("child_profiles").select("*").eq("parent_id", parent_id).execute()
+            
+            if child_profiles_response.data is None or len(child_profiles_response.data) == 0:
+                logger.info(f"No child profiles found for parent {parent_id}")
+                return []
+            
+            # Extract child profile IDs
+            child_profile_ids = [profile["id"] for profile in child_profiles_response.data]
+            
+            # Get user data for parent
+            user_response = supabase.table("users").select("*").eq("id", parent_id).execute()
+            user_data = user_response.data[0] if user_response.data and len(user_response.data) > 0 else None
+            
+            # Get all stories for these child profiles
+            response = supabase.table("stories").select("*").in_("child_profile_id", child_profile_ids).order("created_at", desc=True).execute()
+            
+            if response.data is None:
+                logger.warning("No stories found or query returned None")
+                return []
+            
+            # Merge child profile data with stories
+            stories_with_child_data = []
+            for story in response.data:
+                child_profile = next((cp for cp in child_profiles_response.data if cp["id"] == story["child_profile_id"]), None)
+                user_name = "Unknown"
+                if user_data:
+                    first_name = user_data.get('first_name', '')
+                    last_name = user_data.get('last_name', '')
+                    user_name = f"{first_name} {last_name}".strip() or "Unknown"
+                story_with_data = {
+                    **story,
+                    "user_name": user_name,
+                    "child_profiles": child_profile
+                }
+                stories_with_child_data.append(story_with_data)
+            
+            logger.info(f"Retrieved {len(stories_with_child_data)} stories for parent {parent_id}")
+            return stories_with_child_data
+        else:
+            # Query all stories from the stories table
+            response = supabase.table("stories").select("*").execute()
+            
+            if response.data is None:
+                logger.warning("No stories found or query returned None")
+                return []
+            
+            logger.info(f"Retrieved {len(response.data)} stories")
+            return response.data
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error listing all books: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error listing all books: {str(e)}")
+
+@app.get("/api/books/{id}/preview")
+async def get_book_preview(id: str):
+    """
+    Get book data from the stories table by ID or UID
+    
+    Args:
+        id: Book ID (integer) or UID (string)
+    
+    Returns:
+        Book data from the stories table
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        # Try to find book by uid first (in case id is a string uid)
+        story_response = supabase.table("stories").select("*").eq("uid", id).execute()
+        
+        # If no result with uid, try id (in case id is an integer)
+        if not story_response.data or len(story_response.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Book {id} not found (tried both uid and id)"
+            )
+        
+        book_data = story_response.data[0]
+        logger.info(f"Retrieved book preview for id={id}")
+        
+        return book_data
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting book preview: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error getting book preview: {str(e)}")
+
+@app.delete("/api/books/{id}")
+async def delete_book(id: str):
+    """
+    Delete a book from the stories table by ID or UID
+    
+    Args:
+        id: Book ID (integer) or UID (string)
+    
+    Returns:
+        Success message with deleted book information
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        # First, try to find the book by uid (in case id is a string uid)
+        story_response = supabase.table("stories").select("*").eq("uid", id).execute()
+        
+        # If no result with uid, try id (in case id is an integer)
+        if not story_response.data or len(story_response.data) == 0:
+            # Try by numeric id
+            try:
+                numeric_id = int(id)
+                story_response = supabase.table("stories").select("*").eq("id", numeric_id).execute()
+            except ValueError:
+                pass  # id is not numeric, continue with error
+        
+        if not story_response.data or len(story_response.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Book {id} not found"
+            )
+        
+        book_data = story_response.data[0]
+        book_id = book_data.get("id")
+        book_uid = book_data.get("uid")
+        
+        # Delete the book - try by id first (more reliable)
+        if book_id:
+            delete_response = supabase.table("stories").delete().eq("id", book_id).execute()
+        elif book_uid:
+            delete_response = supabase.table("stories").delete().eq("uid", book_uid).execute()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Book has no valid identifier (id or uid)"
+            )
+        
+        logger.info(f"Deleted book with id={id} (db_id={book_id}, uid={book_uid})")
+        
+        return {
+            "success": True,
+            "message": f"Book {id} deleted successfully",
+            "deleted_book": {
+                "id": book_id,
+                "uid": book_uid,
+                "title": book_data.get("story_title", "Unknown")
+            }
+        }
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting book: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error deleting book: {str(e)}")
+
+@app.get("/api/users/children")
+async def list_child_profiles(parent_id: Optional[str] = None):
+    """
+    List child profiles from the child_profiles table
+    
+    Args:
+        parent_id: Optional parent user ID to filter children by parent
+    
+    Returns:
+        List of child profile data, optionally filtered by parent
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        # If parent_id is provided, filter by parent
+        if parent_id:
+            response = supabase.table("child_profiles").select("*").eq("parent_id", parent_id).execute()
+        else:
+            # Query all child profiles if no parent_id provided
+            response = supabase.table("child_profiles").select("*").execute()
+        
+        if response.data is None:
+            logger.warning("No child profiles found or query returned None")
+            return []
+        
+        logger.info(f"Retrieved {len(response.data)} child profiles" + (f" for parent {parent_id}" if parent_id else ""))
+        
+        return response.data
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error listing child profiles: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error listing child profiles: {str(e)}")
+
+@app.get("/api/characters")
+async def list_characters():
+    """
+    List all created characters from the stories table
+    
+    Returns:
+        List of character data from stories
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        # Query all stories to get character data
+        # Select character-related fields from stories table
+        response = supabase.table("stories").select("*").execute()
+        
+        if response.data is None:
+            logger.warning("No characters found or query returned None")
+            return []
+        
+        # Extract character information from stories
+        # Each story contains character data (character_name, character_type, etc.)
+        characters = response.data
+        
+        logger.info(f"Retrieved {len(characters)} characters from stories")
+        
+        return characters
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error listing characters: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error listing characters: {str(e)}")
+
 @app.post("/generate-story/", response_model=StoryResponse)
 async def generate_story_endpoint(request: StoryRequest):
     """Generate a 5-page children's story based on the provided parameters"""

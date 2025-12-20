@@ -556,7 +556,6 @@ def create_book_pdf_with_cover(
 
         
         for i, scene_url in enumerate(scene_urls_to_use, 1):
-            print(f"==========================================================================scene_urls_to_use: {scene_url}")
             if scene_url:
                 logger.info(f"Adding scene {i}/{len(scene_urls_to_use)}...")
                 scene_image_data = download_image_from_url(scene_url)
