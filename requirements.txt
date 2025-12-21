@@ -9,5 +9,3 @@ google-genai
 gtts>=2.5.0
 openai
 reportlab>=4.0.0
-apscheduler==3.10.4
-sse-starlette==2.1.3

@@ -31,8 +31,6 @@ from validation_utils import ConsistencyValidationResult
 from audio_generator import AudioGenerator
 import asyncio
 from contextlib import asynccontextmanager
-from gift_scheduler import GiftScheduler
-from sse_starlette.sse import EventSourceResponse
 
 # Load environment variables
 load_dotenv()
@@ -87,13 +85,10 @@ queue_manager = None
 batch_processor = None
 worker_task = None
 
-# Initialize gift scheduler
-gift_scheduler = None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for background tasks"""
-    global queue_manager, batch_processor, worker_task, gift_scheduler
+    global queue_manager, batch_processor, worker_task
     
     # Initialize queue manager
     if supabase:
@@ -110,11 +105,6 @@ async def lifespan(app: FastAPI):
         # Start background worker
         worker_task = asyncio.create_task(background_worker())
         logger.info("✅ Background worker started")
-        
-        # Initialize and start gift scheduler
-        gift_scheduler = GiftScheduler(supabase)
-        gift_scheduler.start()
-        logger.info("✅ Gift Scheduler initialized and started")
     
     yield
     
@@ -126,10 +116,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("✅ Background worker stopped")
-    
-    if gift_scheduler:
-        gift_scheduler.stop()
-        logger.info("✅ Gift Scheduler stopped")
 
 # FastAPI app
 app = FastAPI(
@@ -2160,131 +2146,6 @@ async def record_book_purchase(
     except Exception as e:
         logger.error(f"Error recording purchase: {e}")
         raise HTTPException(status_code=500, detail=f"Error recording purchase: {str(e)}")
-
-
-# ==================== GIFT SCHEDULER & SSE ENDPOINTS ====================
-
-@app.get("/api/gifts/notifications/stream")
-async def gift_notifications_stream(
-    request: Request,
-    user_id: Optional[str] = None
-):
-    """
-    Server-Sent Events (SSE) endpoint for real-time gift notifications
-    
-    This endpoint maintains a long-lived connection and pushes notifications
-    when gifts are delivered at their scheduled time.
-    
-    Args:
-        user_id: User ID to receive notifications for (required)
-    
-    Returns:
-        EventSourceResponse with real-time gift notifications
-    """
-    if not gift_scheduler:
-        raise HTTPException(status_code=500, detail="Gift scheduler not initialized")
-    
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id parameter is required")
-    
-    # Create a queue for this client
-    queue = asyncio.Queue()
-    
-    # Register the client with the gift scheduler
-    gift_scheduler.register_sse_client(user_id, queue)
-    
-    async def event_generator():
-        """Generate SSE events from the queue"""
-        try:
-            # Send initial connection message
-            yield {
-                "event": "connected",
-                "data": json.dumps({
-                    "message": "Connected to gift notification stream",
-                    "user_id": user_id,
-                    "timestamp": datetime.now().isoformat()
-                })
-            }
-            
-            # Keep connection alive and send notifications
-            while True:
-                # Check if client is still connected
-                if await request.is_disconnected():
-                    logger.info(f"Client {user_id} disconnected from SSE")
-                    break
-                
-                try:
-                    # Wait for notification with timeout (for periodic heartbeat)
-                    notification = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    
-                    # Send notification to client
-                    yield {
-                        "event": notification.get("type", "notification"),
-                        "data": json.dumps(notification)
-                    }
-                    
-                except asyncio.TimeoutError:
-                    # Send heartbeat to keep connection alive
-                    yield {
-                        "event": "heartbeat",
-                        "data": json.dumps({"timestamp": datetime.now().isoformat()})
-                    }
-                    
-        except asyncio.CancelledError:
-            logger.info(f"SSE connection cancelled for user {user_id}")
-        except Exception as e:
-            logger.error(f"Error in SSE event generator for user {user_id}: {e}")
-        finally:
-            # Unregister client on disconnect
-            gift_scheduler.unregister_sse_client(user_id, queue)
-            logger.info(f"Client {user_id} unregistered from SSE")
-    
-    return EventSourceResponse(event_generator())
-
-
-@app.get("/api/gifts/scheduler/status")
-async def get_scheduler_status():
-    """
-    Get gift scheduler status and statistics
-    
-    Returns:
-        Scheduler status information
-    """
-    if not gift_scheduler:
-        raise HTTPException(status_code=500, detail="Gift scheduler not initialized")
-    
-    try:
-        stats = gift_scheduler.get_statistics()
-        return {
-            "success": True,
-            "scheduler": stats
-        }
-    except Exception as e:
-        logger.error(f"Error getting scheduler status: {e}")
-        raise HTTPException(status_code=500, detail=f"Error getting scheduler status: {str(e)}")
-
-
-@app.post("/api/gifts/scheduler/trigger")
-async def trigger_gift_check():
-    """
-    Manually trigger gift delivery check (for testing)
-    
-    Returns:
-        Success message
-    """
-    if not gift_scheduler:
-        raise HTTPException(status_code=500, detail="Gift scheduler not initialized")
-    
-    try:
-        logger.info("📣 Manually triggered gift delivery check")
-        await gift_scheduler.check_and_deliver_gifts()
-        return {
-            "success": True,
-            "message": "Gift delivery check triggered successfully"
-        }
-    except Exception as e:
-        logger.error(f"Error triggering gift check: {e}")
-        raise HTTPException(status_code=500, detail=f"Error triggering gift check: {str(e)}")
 
 
 if __name__ == "__main__":
