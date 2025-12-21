@@ -80,16 +80,15 @@ if SUPABASE_URL:
 else:
     logger.warning("⚠️ Supabase URL not found. Storage upload will be disabled.")
 
-# Initialize queue manager, batch processor, and gift scheduler
+# Initialize queue manager and batch processor
 queue_manager = None
 batch_processor = None
 worker_task = None
-gift_scheduler = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for background tasks"""
-    global queue_manager, batch_processor, worker_task, gift_scheduler
+    global queue_manager, batch_processor, worker_task
     
     # Initialize queue manager
     if supabase:
@@ -106,12 +105,6 @@ async def lifespan(app: FastAPI):
         # Start background worker
         worker_task = asyncio.create_task(background_worker())
         logger.info("✅ Background worker started")
-        
-        # Initialize and start gift scheduler
-        from gift_scheduler import init_gift_scheduler
-        gift_scheduler = init_gift_scheduler(supabase, check_interval=60)
-        await gift_scheduler.start()
-        logger.info("✅ Gift scheduler initialized and started")
     
     yield
     
@@ -123,11 +116,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("✅ Background worker stopped")
-    
-    # Stop gift scheduler
-    if gift_scheduler:
-        await gift_scheduler.stop()
-        logger.info("✅ Gift scheduler stopped")
 
 # FastAPI app
 app = FastAPI(
@@ -2158,67 +2146,6 @@ async def record_book_purchase(
     except Exception as e:
         logger.error(f"Error recording purchase: {e}")
         raise HTTPException(status_code=500, detail=f"Error recording purchase: {str(e)}")
-
-
-@app.get("/api/gifts/upcoming")
-async def get_upcoming_gift_deliveries(hours: int = 24):
-    """
-    Get upcoming gift deliveries in the next N hours
-    
-    Args:
-        hours: Number of hours to look ahead (default: 24)
-    
-    Returns:
-        List of gifts scheduled for delivery
-    """
-    try:
-        if not gift_scheduler:
-            raise HTTPException(
-                status_code=503,
-                detail="Gift scheduler not available"
-            )
-        
-        upcoming_gifts = gift_scheduler.get_upcoming_deliveries(hours)
-        
-        return {
-            "success": True,
-            "count": len(upcoming_gifts),
-            "hours": hours,
-            "gifts": upcoming_gifts
-        }
-        
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error getting upcoming deliveries: {e}")
-        raise HTTPException(status_code=500, detail=f"Error getting upcoming deliveries: {str(e)}")
-
-
-@app.get("/api/gifts/scheduler/status")
-async def get_gift_scheduler_status():
-    """
-    Get the status of the gift scheduler service
-    
-    Returns:
-        Scheduler status information
-    """
-    try:
-        if not gift_scheduler:
-            return {
-                "running": False,
-                "message": "Gift scheduler not initialized"
-            }
-        
-        return {
-            "running": gift_scheduler.running,
-            "check_interval": gift_scheduler.check_interval,
-            "processed_gifts_count": len(gift_scheduler._processed_gifts),
-            "message": "Gift scheduler is running" if gift_scheduler.running else "Gift scheduler is stopped"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting scheduler status: {e}")
-        raise HTTPException(status_code=500, detail=f"Error getting scheduler status: {str(e)}")
 
 
 if __name__ == "__main__":
