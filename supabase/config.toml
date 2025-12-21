@@ -1,0 +1,6 @@
+# Supabase Configuration File
+# This file is used for local development and deployment
+
+[functions.send-gift-notification]
+verify_jwt = false  # Set to true if you want JWT verification
+
