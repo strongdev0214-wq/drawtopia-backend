@@ -1114,14 +1114,14 @@ async def root(request: Request):
 
 @app.post("/validate-image-quality/", response_model=QualityValidationResponse)
 @limiter.limit("30/minute")
-async def validate_image_quality_endpoint(http_request: Request, request: ImageRequest):
+async def validate_image_quality_endpoint(request: Request, body: ImageRequest):
     """
     Standalone endpoint to validate image quality without editing.
     Useful for pre-validation before processing.
     """
     try:
         # Convert HttpUrl to string for processing
-        image_url_str = str(request.image_url)
+        image_url_str = str(body.image_url)
         
         # Download the image from the URL provided
         logger.info(f"Downloading image for quality validation from: {image_url_str}")
@@ -1166,10 +1166,10 @@ async def health_check(request: Request):
 
 @app.post("/edit-image/", response_model=ImageResponse)
 @limiter.limit("20/minute")
-async def edit_image_endpoint(http_request: Request, request: ImageRequest):
+async def edit_image_endpoint(request: Request, body: ImageRequest):
     try:
         # Convert HttpUrl to string for processing
-        image_url_str = str(request.image_url)
+        image_url_str = str(body.image_url)
         
         # Download the image from the URL provided
         logger.info(f"Downloading image from: {image_url_str}")
@@ -1186,8 +1186,8 @@ async def edit_image_endpoint(http_request: Request, request: ImageRequest):
             # For now, we'll continue but include validation in response
         
         # Send the image to Gemini API for editing
-        logger.info(f"Received prompt: {request.prompt}")
-        edited_image = edit_image(image_data, request.prompt, image_url_str)
+        logger.info(f"Received prompt: {body.prompt}")
+        edited_image = edit_image(image_data, body.prompt, image_url_str)
         
         # Optimize image to JPG format for smaller file size
         logger.info("Optimizing image to JPG format...")
@@ -1227,19 +1227,19 @@ async def edit_image_endpoint(http_request: Request, request: ImageRequest):
 
 @app.post("/edit-image-stream/")
 @limiter.limit("20/minute")
-async def edit_image_stream_endpoint(http_request: Request, request: ImageRequest):
+async def edit_image_stream_endpoint(request: Request, body: ImageRequest):
     """Alternative endpoint that returns the image as a stream (for direct download)"""
     try:
         # Convert HttpUrl to string for processing
-        image_url_str = str(request.image_url)
+        image_url_str = str(body.image_url)
         
         # Download the image from the URL provided
         logger.info(f"Downloading image from: {image_url_str}")
         image_data = download_image_from_url(image_url_str)
 
         # Send the image to Gemini API for editing
-        logger.info(f"Received prompt: {request.prompt}")
-        edited_image = edit_image(image_data, request.prompt, image_url_str)
+        logger.info(f"Received prompt: {body.prompt}")
+        edited_image = edit_image(image_data, body.prompt, image_url_str)
         
         # Optimize image to JPG format for smaller file size
         logger.info("Optimizing image to JPG format...")
@@ -1322,7 +1322,7 @@ async def background_worker():
 
 @app.post("/api/books/generate", response_model=JobResponse)
 @limiter.limit("10/minute")
-async def create_book_generation_job(http_request: Request, request: BatchJobRequest):
+async def create_book_generation_job(request: Request, body: BatchJobRequest):
     """Create a new book generation job"""
     try:
         if not queue_manager:
@@ -1332,7 +1332,7 @@ async def create_book_generation_job(http_request: Request, request: BatchJobReq
             )
         
         # Validate job_type
-        if request.job_type not in ["interactive_search", "story_adventure"]:
+        if body.job_type not in ["interactive_search", "story_adventure"]:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid job_type. Must be 'interactive_search' or 'story_adventure'"
@@ -1340,14 +1340,14 @@ async def create_book_generation_job(http_request: Request, request: BatchJobReq
         
         # Validate age_group
         valid_age_groups = ["3-6", "7-10", "11-12"]
-        if request.age_group not in valid_age_groups:
+        if body.age_group not in valid_age_groups:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid age_group: {request.age_group}. Must be one of: {', '.join(valid_age_groups)}"
+                detail=f"Invalid age_group: {body.age_group}. Must be one of: {', '.join(valid_age_groups)}"
             )
         
         # Validate priority
-        if request.priority < 1 or request.priority > 10:
+        if body.priority < 1 or body.priority > 10:
             raise HTTPException(
                 status_code=400,
                 detail="Priority must be between 1 and 10 (1 is highest)"
@@ -1355,23 +1355,23 @@ async def create_book_generation_job(http_request: Request, request: BatchJobReq
         
         # Prepare job data
         job_data = {
-            "character_name": request.character_name,
-            "character_type": request.character_type,
-            "special_ability": request.special_ability,
-            "age_group": request.age_group,
-            "story_world": request.story_world,
-            "adventure_type": request.adventure_type,
-            "occasion_theme": request.occasion_theme,
-            "character_image_url": str(request.character_image_url) if request.character_image_url else None
+            "character_name": body.character_name,
+            "character_type": body.character_type,
+            "special_ability": body.special_ability,
+            "age_group": body.age_group,
+            "story_world": body.story_world,
+            "adventure_type": body.adventure_type,
+            "occasion_theme": body.occasion_theme,
+            "character_image_url": str(body.character_image_url) if body.character_image_url else None
         }
         
         # Create job
         job = queue_manager.create_job(
-            job_type=request.job_type,
+            job_type=body.job_type,
             job_data=job_data,
-            user_id=request.user_id,
-            child_profile_id=request.child_profile_id,
-            priority=request.priority
+            user_id=body.user_id,
+            child_profile_id=body.child_profile_id,
+            priority=body.priority
         )
         
         return JobResponse(
@@ -1890,19 +1890,19 @@ async def get_user_statistics_summary(request: Request):
 
 @app.post("/generate-story/", response_model=StoryResponse)
 @limiter.limit("10/minute")
-async def generate_story_endpoint(http_request: Request, request: StoryRequest):
+async def generate_story_endpoint(request: Request, body: StoryRequest):
     """Generate a 5-page children's story based on the provided parameters"""
     try:
         # Validate age_group
         valid_age_groups = ["3-6", "7-10", "11-12"]
-        if request.age_group not in valid_age_groups:
+        if body.age_group not in valid_age_groups:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid age_group: {request.age_group}. Must be one of: {', '.join(valid_age_groups)}"
+                detail=f"Invalid age_group: {body.age_group}. Must be one of: {', '.join(valid_age_groups)}"
             )
         
-        logger.info(f"Generating story for character: {request.character_name}")
-        logger.info(f"Age group: {request.age_group}, Adventure: {request.adventure_type}")
+        logger.info(f"Generating story for character: {body.character_name}")
+        logger.info(f"Age group: {body.age_group}, Adventure: {body.adventure_type}")
         
         # Validate API keys
         if not OPENAI_API_KEY:
@@ -1920,23 +1920,23 @@ async def generate_story_endpoint(http_request: Request, request: StoryRequest):
         # Generate the story using OpenAI (GPT-4) via the story library
         logger.info("Generating story with OpenAI GPT-4...")
         story_result = generate_story(
-            character_name=request.character_name,
-            character_type=request.character_type,
-            special_ability=request.special_ability,
-            age_group=request.age_group,
-            story_world=request.story_world,
-            adventure_type=request.adventure_type,
-            occasion_theme=request.occasion_theme,
+            character_name=body.character_name,
+            character_type=body.character_type,
+            special_ability=body.special_ability,
+            age_group=body.age_group,
+            story_world=body.story_world,
+            adventure_type=body.adventure_type,
+            occasion_theme=body.occasion_theme,
             use_api=True,  # Use OpenAI API for story generation
             api_key=OPENAI_API_KEY,
-            story_text_prompt=request.story_text_prompt  # Use prompt from frontend if provided
+            story_text_prompt=body.story_text_prompt  # Use prompt from frontend if provided
         )
         
         logger.info(f"Story generated successfully. Word count: {story_result['word_count']}")
         
         # Generate scene images for each page using Gemini Pro image preview model
         logger.info("Generating scene images with Gemini Pro image preview model for each story page...")
-        reference_image_url = str(request.character_image_url) if request.character_image_url else None
+        reference_image_url = str(body.character_image_url) if body.character_image_url else None
         
         # Download reference image once for consistency validation
         reference_image_data = None
@@ -1957,8 +1957,8 @@ async def generate_story_endpoint(http_request: Request, request: StoryRequest):
             logger.info(f"Generating scene image for page {i}/5...")
             # Use scene prompt from frontend if available, otherwise use None (will generate from params)
             scene_prompt = None
-            if request.scene_prompts and len(request.scene_prompts) >= i:
-                scene_prompt = request.scene_prompts[i - 1]  # i is 1-indexed, list is 0-indexed
+            if body.scene_prompts and len(body.scene_prompts) >= i:
+                scene_prompt = body.scene_prompts[i - 1]  # i is 1-indexed, list is 0-indexed
                 # Replace placeholder with actual page text
                 scene_prompt = scene_prompt.replace(
                     f"[Page {i} text will be inserted here after story generation]",
@@ -1969,9 +1969,9 @@ async def generate_story_endpoint(http_request: Request, request: StoryRequest):
             scene_url = generate_story_scene_image(
                 story_page_text=page_text,
                 page_number=i,
-                character_name=request.character_name,
-                character_type=request.character_type,
-                story_world=request.story_world,
+                character_name=body.character_name,
+                character_type=body.character_type,
+                story_world=body.story_world,
                 reference_image_url=reference_image_url,
                 scene_prompt=scene_prompt
             )
@@ -2039,7 +2039,7 @@ async def generate_story_endpoint(http_request: Request, request: StoryRequest):
                     # Generate audio for all pages
                     audio_data_list = audio_generator.generate_audio_for_story(
                         story_pages=story_result['pages'],
-                        age_group=request.age_group,
+                        age_group=body.age_group,
                         timeout_per_page=60
                     )
                     
