@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi import Header
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from io import BytesIO
@@ -31,6 +31,14 @@ from validation_utils import ConsistencyValidationResult
 from audio_generator import AudioGenerator
 import asyncio
 from contextlib import asynccontextmanager
+
+# Import security utilities
+from rate_limiter import limiter, rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from csrf_protection import generate_csrf_token, verify_csrf_token, CSRFProtection
+from security_utils import sanitize_input, sanitize_filename, validate_email, validate_phone, encrypt_data, decrypt_data
+from virus_scanner import get_virus_scanner
+import jwt
 
 # Load environment variables
 load_dotenv()
@@ -51,6 +59,18 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # Service role key for storage operations
 STORAGE_BUCKET = "images"
+
+# Security Configuration
+JWT_SECRET = os.getenv("JWT_SECRET", "change-this-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
+
+# CORS Configuration - use environment variables for production
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
+
+# Production mode check
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
 
 # Initialize Gemini client
 gemini_client = None
@@ -127,20 +147,39 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    return response
+
 # Add trusted host middleware (helps prevent invalid requests)
 app.add_middleware(
     TrustedHostMiddleware, 
-    allowed_hosts=["*"]  # In production, specify actual domains
+    allowed_hosts=ALLOWED_HOSTS
 )
 
-# Add CORS middleware
+# Add CORS middleware with environment-based configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domains
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
+    expose_headers=["X-CSRF-Token"]
 )
+
+# Add rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# Initialize CSRF protection
+csrf_protection = CSRFProtection()
 
 # Global exception handler for better error handling
 @app.exception_handler(Exception)
@@ -397,17 +436,29 @@ def optimize_image_to_jpg(image_data: bytes, quality: int = 85) -> bytes:
         # Return original data if optimization fails
         return image_data
 
-def upload_to_supabase(image_data: bytes, filename: str) -> dict:
-    """Upload image to Supabase storage and return the public URL"""
+def upload_to_supabase(image_data: bytes, filename: str, use_signed_url: bool = True) -> dict:
+    """Upload image to Supabase storage and return signed or public URL"""
     if not supabase:
         logger.warning("Supabase client not available, skipping upload")
         return {"uploaded": False, "url": None, "message": "Supabase not configured"}
 
     try:
+        # Sanitize filename
+        filename = sanitize_filename(filename)
         logger.info(f"Uploading {filename} to Supabase storage bucket '{STORAGE_BUCKET}'")
 
-        # Pass image_data directly as bytes to Supabase storage
+        # Scan file for viruses
+        scanner = get_virus_scanner()
+        scan_result = scanner.scan_file(image_data, filename)
+        if not scan_result["is_safe"]:
+            logger.error(f"❌ File failed security scan: {scan_result['threats_found']}")
+            return {
+                "uploaded": False,
+                "url": None,
+                "message": f"File failed security scan: {', '.join(scan_result['threats_found'])}"
+            }
 
+        # Pass image_data directly as bytes to Supabase storage
         response = supabase.storage.from_(STORAGE_BUCKET).upload(filename, image_data, {
             'content-type' : 'image/jpeg',
             'upsert' : 'true'
@@ -415,15 +466,35 @@ def upload_to_supabase(image_data: bytes, filename: str) -> dict:
 
         # Check response type - response is an UploadResponse object
         if hasattr(response, 'full_path') and response.full_path:
-            public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
-            logger.info(f"✅ Successfully uploaded to Supabase: {public_url}")
+            # Use signed URL with 30-day expiry for production
+            if use_signed_url and IS_PRODUCTION:
+                try:
+                    signed_url_response = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(
+                        filename,
+                        60 * 60 * 24 * 30  # 30 days in seconds
+                    )
+                    if signed_url_response and 'signedURL' in signed_url_response:
+                        url = signed_url_response['signedURL']
+                        logger.info(f"✅ Successfully uploaded with signed URL (30-day expiry)")
+                    else:
+                        # Fallback to public URL
+                        url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
+                        logger.warning("⚠️ Signed URL failed, using public URL")
+                except Exception as e:
+                    logger.warning(f"⚠️ Signed URL creation failed: {e}, using public URL")
+                    url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
+            else:
+                url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
+            
+            logger.info(f"✅ Successfully uploaded to Supabase: {url[:100]}...")
 
             return {
                 "uploaded": True,
-                "url": public_url,
+                "url": url,
                 "filename": filename,
                 "bucket": STORAGE_BUCKET,
-                "message": "Successfully uploaded to Supabase storage"
+                "message": "Successfully uploaded to Supabase storage",
+                "security_scan": scan_result
             }
 
         logger.error(f"❌ Unexpected Supabase response: {response}")
@@ -958,18 +1029,103 @@ Generate a high-quality illustration that perfectly captures this story moment i
         logger.debug(f"Traceback: {traceback.format_exc()}")
         return ""
 
+def create_jwt_token(user_id: str, additional_claims: Optional[Dict] = None) -> str:
+    """
+    Create JWT token with expiration
+    
+    Args:
+        user_id: User ID to encode in token
+        additional_claims: Additional claims to include
+        
+    Returns:
+        JWT token string
+    """
+    payload = {
+        "user_id": user_id,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+        "iat": datetime.utcnow()
+    }
+    
+    if additional_claims:
+        payload.update(additional_claims)
+    
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_jwt_token(token: str) -> Optional[Dict]:
+    """
+    Verify and decode JWT token
+    
+    Args:
+        token: JWT token to verify
+        
+    Returns:
+        Decoded payload or None if invalid
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        logger.warning("JWT token expired")
+        return None
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid JWT token: {e}")
+        return None
+
+
+def extract_user_from_token(authorization: Optional[str]) -> Optional[str]:
+    """
+    Extract user ID from Authorization header
+    
+    Args:
+        authorization: Authorization header value
+        
+    Returns:
+        User ID or None
+    """
+    if not authorization:
+        return None
+    
+    try:
+        # Extract token from "Bearer <token>"
+        if authorization.startswith("Bearer "):
+            token = authorization[7:]
+            payload = verify_jwt_token(token)
+            if payload:
+                return payload.get("user_id")
+    except Exception as e:
+        logger.warning(f"Error extracting user from token: {e}")
+    
+    return None
+
+
 @app.get("/")
-async def root():
+@limiter.limit("60/minute")
+async def root(request: Request):
     """Root endpoint with API information"""
     return {
         "message": "AI Image Editor API",
         "version": "1.0.0",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "security": {
+            "rate_limiting": "enabled",
+            "csrf_protection": "enabled",
+            "jwt_expiration": f"{JWT_EXPIRATION_HOURS} hours"
+        }
     }
 
+
+@app.get("/api/csrf-token")
+@limiter.limit("10/minute")
+async def get_csrf_token(request: Request):
+    """Get CSRF token for form submissions"""
+    token = generate_csrf_token()
+    return {"csrf_token": token}
+
 @app.post("/validate-image-quality/", response_model=QualityValidationResponse)
-async def validate_image_quality_endpoint(request: ImageRequest):
+@limiter.limit("30/minute")
+async def validate_image_quality_endpoint(http_request: Request, request: ImageRequest, csrf_verified: bool = Depends(verify_csrf_token)):
     """
     Standalone endpoint to validate image quality without editing.
     Useful for pre-validation before processing.
@@ -998,8 +1154,10 @@ async def validate_image_quality_endpoint(request: ImageRequest):
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
 
 @app.get("/health")
-async def health_check():
+@limiter.limit("30/minute")
+async def health_check(request: Request):
     """Health check endpoint"""
+    scanner = get_virus_scanner()
     return {
         "status": "healthy",
         "timestamp": time.time(),
@@ -1009,11 +1167,18 @@ async def health_check():
         "model": MODEL,
         "supabase_configured": bool(supabase is not None),
         "storage_bucket": STORAGE_BUCKET if supabase else None,
-        "quality_validation_enabled": bool(gemini_client is not None)
+        "quality_validation_enabled": bool(gemini_client is not None),
+        "virus_scanner_available": scanner.is_available(),
+        "security": {
+            "rate_limiting": "enabled",
+            "csrf_protection": "enabled",
+            "virus_scanning": "enabled" if scanner.is_available() else "basic_checks_only"
+        }
     }
 
 @app.post("/edit-image/", response_model=ImageResponse)
-async def edit_image_endpoint(request: ImageRequest):
+@limiter.limit("20/minute")
+async def edit_image_endpoint(http_request: Request, request: ImageRequest, csrf_verified: bool = Depends(verify_csrf_token)):
     try:
         # Convert HttpUrl to string for processing
         image_url_str = str(request.image_url)
@@ -1073,7 +1238,8 @@ async def edit_image_endpoint(request: ImageRequest):
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
 
 @app.post("/edit-image-stream/")
-async def edit_image_stream_endpoint(request: ImageRequest):
+@limiter.limit("20/minute")
+async def edit_image_stream_endpoint(http_request: Request, request: ImageRequest, csrf_verified: bool = Depends(verify_csrf_token)):
     """Alternative endpoint that returns the image as a stream (for direct download)"""
     try:
         # Convert HttpUrl to string for processing
@@ -1167,7 +1333,8 @@ async def background_worker():
             await asyncio.sleep(5)
 
 @app.post("/api/books/generate", response_model=JobResponse)
-async def create_book_generation_job(request: BatchJobRequest):
+@limiter.limit("10/minute")
+async def create_book_generation_job(http_request: Request, request: BatchJobRequest, csrf_verified: bool = Depends(verify_csrf_token)):
     """Create a new book generation job"""
     try:
         if not queue_manager:
@@ -1232,7 +1399,8 @@ async def create_book_generation_job(request: BatchJobRequest):
         raise HTTPException(status_code=500, detail=f"Error creating job: {str(e)}")
 
 @app.get("/api/books/{book_id}/status", response_model=JobStatusResponse)
-async def get_book_status(book_id: int):
+@limiter.limit("60/minute")
+async def get_book_status(request: Request, book_id: int):
     """Get the status of a book generation job"""
     try:
         if not queue_manager:
@@ -1267,7 +1435,8 @@ async def get_book_status(book_id: int):
         raise HTTPException(status_code=500, detail=f"Error getting job status: {str(e)}")
 
 @app.get("/api/books/")
-async def list_all_books(parent_id: Optional[str] = None):
+@limiter.limit("60/minute")
+async def list_all_books(request: Request, parent_id: Optional[str] = None):
     """
     Get all story data from the stories table
     
@@ -1345,7 +1514,8 @@ async def list_all_books(parent_id: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Error listing all books: {str(e)}")
 
 @app.get("/api/books/{id}/preview")
-async def get_book_preview(id: str):
+@limiter.limit("60/minute")
+async def get_book_preview(request: Request, id: str):
     """
     Get book data from the stories table by ID or UID
     
@@ -1386,7 +1556,8 @@ async def get_book_preview(id: str):
         raise HTTPException(status_code=500, detail=f"Error getting book preview: {str(e)}")
 
 @app.delete("/api/books/{id}")
-async def delete_book(id: str):
+@limiter.limit("30/minute")
+async def delete_book(request: Request, id: str, csrf_verified: bool = Depends(verify_csrf_token)):
     """
     Delete a book from the stories table by ID or UID
     
@@ -1457,7 +1628,8 @@ async def delete_book(id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting book: {str(e)}")
 
 @app.get("/api/users/children")
-async def list_child_profiles(parent_id: Optional[str] = None):
+@limiter.limit("60/minute")
+async def list_child_profiles(request: Request, parent_id: Optional[str] = None):
     """
     List child profiles from the child_profiles table
     
@@ -1498,7 +1670,8 @@ async def list_child_profiles(parent_id: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Error listing child profiles: {str(e)}")
 
 @app.get("/api/characters")
-async def list_characters():
+@limiter.limit("60/minute")
+async def list_characters(request: Request):
     """
     List all created characters from the stories table
     
@@ -1536,8 +1709,200 @@ async def list_characters():
         logger.debug(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error listing characters: {str(e)}")
 
+@app.get("/api/dashboard/user-statistics")
+@limiter.limit("30/minute")
+async def get_user_statistics(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """
+    Get user statistics for dashboard
+    
+    Args:
+        start_date: ISO format date string (optional) - filter users created after this date
+        end_date: ISO format date string (optional) - filter users created before this date
+    
+    Returns:
+        Dictionary with user statistics including:
+        - Total registered users
+        - New users (daily/weekly/monthly)
+        - Active users (users who created stories/books)
+        - User role distribution
+        - Users by subscription status
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        logger.info(f"Fetching user statistics (start_date={start_date}, end_date={end_date})")
+        
+        # === TOTAL REGISTERED USERS ===
+        users_query = supabase.table("users").select("id, created_at, role, subscription_status")
+        
+        # Apply date filters if provided
+        if start_date:
+            users_query = users_query.gte("created_at", start_date)
+        if end_date:
+            users_query = users_query.lte("created_at", end_date)
+        
+        users_response = users_query.execute()
+        all_users = users_response.data if users_response.data else []
+        total_users = len(all_users)
+        
+        logger.info(f"Total users found: {total_users}")
+        
+        # === USER ROLE DISTRIBUTION ===
+        role_distribution = {}
+        subscription_distribution = {}
+        
+        for user in all_users:
+            role = user.get('role', 'unknown')
+            role_distribution[role] = role_distribution.get(role, 0) + 1
+            
+            sub_status = user.get('subscription_status') or 'free'
+            subscription_distribution[sub_status] = subscription_distribution.get(sub_status, 0) + 1
+        
+        # === NEW USERS (DAILY/WEEKLY/MONTHLY) ===
+        from datetime import datetime, timedelta
+        
+        now = datetime.now()
+        yesterday = (now - timedelta(days=1)).isoformat()
+        last_week = (now - timedelta(days=7)).isoformat()
+        last_month = (now - timedelta(days=30)).isoformat()
+        
+        # New users in last 24 hours
+        new_users_daily_response = supabase.table("users").select("id", count="exact").gte("created_at", yesterday).execute()
+        new_users_daily = len(new_users_daily_response.data) if new_users_daily_response.data else 0
+        
+        # New users in last 7 days
+        new_users_weekly_response = supabase.table("users").select("id", count="exact").gte("created_at", last_week).execute()
+        new_users_weekly = len(new_users_weekly_response.data) if new_users_weekly_response.data else 0
+        
+        # New users in last 30 days
+        new_users_monthly_response = supabase.table("users").select("id", count="exact").gte("created_at", last_month).execute()
+        new_users_monthly = len(new_users_monthly_response.data) if new_users_monthly_response.data else 0
+        
+        # === ACTIVE USERS (users who created stories) ===
+        # Get all child profiles with their parent_id and id
+        child_profiles_response = supabase.table("child_profiles").select("id, parent_id").execute()
+        child_profiles = child_profiles_response.data if child_profiles_response.data else []
+        
+        # Create a mapping from child_profile_id to parent_id
+        child_to_parent = {profile['id']: profile['parent_id'] for profile in child_profiles}
+        
+        # Get all stories with their child_profile_id
+        stories_response = supabase.table("stories").select("child_profile_id").execute()
+        stories = stories_response.data if stories_response.data else []
+        
+        # Find unique parent users who have created stories
+        active_user_ids = set()
+        for story in stories:
+            child_profile_id = story.get('child_profile_id')
+            if child_profile_id and child_profile_id in child_to_parent:
+                parent_id = child_to_parent[child_profile_id]
+                active_user_ids.add(parent_id)
+        
+        active_users_count = len(active_user_ids)
+        
+        # === BUILD RESPONSE ===
+        statistics = {
+            "total_users": total_users,
+            "new_users": {
+                "daily": new_users_daily,
+                "weekly": new_users_weekly,
+                "monthly": new_users_monthly
+            },
+            "active_users": {
+                "count": active_users_count,
+                "percentage": round((active_users_count / total_users * 100), 2) if total_users > 0 else 0
+            },
+            "by_role": role_distribution,
+            "by_subscription_status": subscription_distribution,
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "date_range": {
+                    "start": start_date,
+                    "end": end_date
+                }
+            }
+        }
+        
+        logger.info(f"User statistics generated successfully: {statistics}")
+        return statistics
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error generating user statistics: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error generating user statistics: {str(e)}")
+
+@app.get("/api/dashboard/user-statistics/summary")
+@limiter.limit("30/minute")
+async def get_user_statistics_summary(request: Request):
+    """
+    Get quick summary of user statistics (optimized for dashboard widgets)
+    
+    Returns:
+        Dictionary with quick user statistics summary
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        from datetime import datetime, timedelta
+        
+        # Quick counts using count queries
+        users_response = supabase.table("users").select("id", count="exact").execute()
+        total_users = len(users_response.data) if users_response.data else 0
+        
+        # Recent activity (last 24 hours)
+        last_24h = (datetime.now() - timedelta(hours=24)).isoformat()
+        new_users_24h_response = supabase.table("users").select("id", count="exact").gte("created_at", last_24h).execute()
+        new_users_24h = len(new_users_24h_response.data) if new_users_24h_response.data else 0
+        
+        # Get child profiles and stories for active users count
+        child_profiles_response = supabase.table("child_profiles").select("id, parent_id").execute()
+        child_profiles = child_profiles_response.data if child_profiles_response.data else []
+        child_to_parent = {profile['id']: profile['parent_id'] for profile in child_profiles}
+        
+        stories_response = supabase.table("stories").select("child_profile_id").execute()
+        stories = stories_response.data if stories_response.data else []
+        
+        active_user_ids = set()
+        for story in stories:
+            child_profile_id = story.get('child_profile_id')
+            if child_profile_id and child_profile_id in child_to_parent:
+                active_user_ids.add(child_to_parent[child_profile_id])
+        
+        return {
+            "summary": {
+                "total_users": total_users,
+                "active_users": len(active_user_ids),
+                "new_users_24h": new_users_24h
+            },
+            "generated_at": datetime.now().isoformat()
+        }
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error generating summary statistics: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error generating summary statistics: {str(e)}")
+
 @app.post("/generate-story/", response_model=StoryResponse)
-async def generate_story_endpoint(request: StoryRequest):
+@limiter.limit("10/minute")
+async def generate_story_endpoint(http_request: Request, request: StoryRequest, csrf_verified: bool = Depends(verify_csrf_token)):
     """Generate a 5-page children's story based on the provided parameters"""
     try:
         # Validate age_group
@@ -1854,21 +2219,28 @@ def verify_purchase(story_id: int, user_id: Optional[str] = None) -> bool:
         response = query.eq("purchase_status", "completed").execute()
         
         if response.data and len(response.data) > 0:
-            logger.info(f"Purchase verified for story {story_id}, user {user_id}")
+            logger.info(f"✅ Purchase verified for story {story_id}, user {user_id}")
             return True
         
-        # For now, allow free access if no purchase system is set up
-        # In production, this should return False
-        logger.warning(f"No purchase found for story {story_id}, user {user_id} - allowing access (free mode)")
-        return True  # Change to False in production when payment is required
+        # In production mode, enforce purchase verification
+        if IS_PRODUCTION:
+            logger.warning(f"❌ No purchase found for story {story_id}, user {user_id} - access denied")
+            return False
+        
+        # Development mode: allow free access
+        logger.warning(f"⚠️ No purchase found for story {story_id}, user {user_id} - allowing access (development mode)")
+        return True
         
     except Exception as e:
         logger.error(f"Error verifying purchase: {e}")
-        return False
+        # In production, fail closed (deny access on error)
+        return not IS_PRODUCTION
 
 
 @app.get("/api/books/{book_id}/pdf")
+@limiter.limit("10/minute")
 async def download_book_pdf(
+    request: Request,
     book_id: int,
     authorization: Optional[str] = Header(None)
 ):
@@ -1877,7 +2249,7 @@ async def download_book_pdf(
     
     Args:
         book_id: Story/Book ID
-        authorization: Bearer token (optional, for user verification)
+        authorization: Bearer token (required for purchase verification)
     
     Returns:
         PDF file stream
@@ -1885,6 +2257,16 @@ async def download_book_pdf(
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Storage service not available")
+        
+        # Extract user ID from authorization header
+        user_id = extract_user_from_token(authorization)
+        
+        # In production, require authentication
+        if IS_PRODUCTION and not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required to download PDF"
+            )
         
         # Get story/book information
         story_response = supabase.table("stories").select("*").eq("id", book_id).execute()
@@ -1901,24 +2283,12 @@ async def download_book_pdf(
                 detail=f"PDF not available for book {book_id}. PDF may still be generating."
             )
         
-        # Extract user ID from authorization header if provided
-        user_id = None
-        if authorization:
-            try:
-                # In a real implementation, you would decode JWT token here
-                # For now, we'll use a simple approach
-                # You should integrate with your auth system
-                pass
-            except Exception as e:
-                logger.warning(f"Could not extract user ID from authorization: {e}")
-        
-        # Verify purchase (if user_id is available)
-        if user_id:
-            if not verify_purchase(book_id, user_id):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Purchase verification failed. Please purchase this book to download the PDF."
-                )
+        # Verify purchase before allowing download
+        if not verify_purchase(book_id, user_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Purchase verification failed. Please purchase this book to download the PDF."
+            )
         
         # Download PDF from storage
         logger.info(f"Downloading PDF from: {pdf_url}")
@@ -1952,7 +2322,8 @@ async def download_book_pdf(
 
 
 @app.post("/api/books/{book_id}/generate-pdf", response_model=PDFGenerationResponse)
-async def generate_book_pdf(book_id: str):
+@limiter.limit("10/minute")
+async def generate_book_pdf(request: Request, book_id: str, csrf_verified: bool = Depends(verify_csrf_token)):
     """
     Generate PDF on-demand for a book/story
     
@@ -2089,8 +2460,11 @@ async def generate_book_pdf(book_id: str):
 
 
 @app.post("/api/books/{book_id}/purchase")
+@limiter.limit("20/minute")
 async def record_book_purchase(
+    request: Request,
     book_id: int,
+    csrf_verified: bool = Depends(verify_csrf_token),
     user_id: Optional[str] = None,
     transaction_id: Optional[str] = None,
     amount_paid: Optional[float] = None,

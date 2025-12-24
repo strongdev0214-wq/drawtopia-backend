@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import webpush from 'npm:web-push@3.6.7'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -31,97 +32,37 @@ const VAPID_PUBLIC_KEY = Deno.env.get('VAPID_PUBLIC_KEY') || ''
 const VAPID_PRIVATE_KEY = Deno.env.get('VAPID_PRIVATE_KEY') || ''
 const VAPID_SUBJECT = Deno.env.get('VAPID_SUBJECT') || 'mailto:support@drawtopia.com'
 
+// Initialize web-push with VAPID details
+webpush.setVapidDetails(
+  VAPID_SUBJECT,
+  VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY
+)
+
 /**
- * Send a Web Push notification using VAPID
+ * Send a Web Push notification using web-push library
  */
 async function sendWebPush(
   subscription: PushSubscription,
   payload: any
-): Promise<Response> {
+): Promise<{ success: boolean; error?: string; statusCode?: number }> {
   try {
-    // Generate VAPID headers
-    const vapidHeaders = await generateVAPIDHeaders(
-      subscription.endpoint,
-      VAPID_PUBLIC_KEY,
-      VAPID_PRIVATE_KEY,
-      VAPID_SUBJECT
-    )
-
-    // Encrypt the payload
-    const encryptedPayload = await encryptPayload(
+    await webpush.sendNotification(
+      subscription,
       JSON.stringify(payload),
-      subscription.keys.p256dh,
-      subscription.keys.auth
+      {
+        TTL: 86400, // 24 hours
+      }
     )
-
-    // Send the push notification
-    const response = await fetch(subscription.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Encoding': 'aes128gcm',
-        'TTL': '86400', // 24 hours
-        ...vapidHeaders,
-      },
-      body: encryptedPayload,
-    })
-
-    return response
-  } catch (error) {
+    return { success: true }
+  } catch (error: any) {
     console.error('Error sending web push:', error)
-    throw error
+    return { 
+      success: false, 
+      error: error.message,
+      statusCode: error.statusCode 
+    }
   }
-}
-
-/**
- * Generate VAPID headers for authentication
- */
-async function generateVAPIDHeaders(
-  endpoint: string,
-  publicKey: string,
-  privateKey: string,
-  subject: string
-): Promise<Record<string, string>> {
-  // Parse the endpoint URL
-  const url = new URL(endpoint)
-  const audience = `${url.protocol}//${url.host}`
-
-  // Create JWT token (simplified - use web-push library for production)
-  const header = {
-    typ: 'JWT',
-    alg: 'ES256',
-  }
-
-  const now = Math.floor(Date.now() / 1000)
-  const payload = {
-    aud: audience,
-    exp: now + 12 * 60 * 60, // 12 hours
-    sub: subject,
-  }
-
-  // For production, use a proper JWT/VAPID library
-  // This is a simplified implementation
-  const token = `${btoa(JSON.stringify(header))}.${btoa(JSON.stringify(payload))}`
-
-  return {
-    'Authorization': `vapid t=${token}, k=${publicKey}`,
-  }
-}
-
-/**
- * Encrypt payload for Web Push (simplified)
- * For production, use web-push library
- */
-async function encryptPayload(
-  payload: string,
-  p256dh: string,
-  auth: string
-): Promise<Uint8Array> {
-  // This is a simplified version
-  // For production, implement full Web Push encryption (RFC 8291)
-  // or use the web-push npm package
-  const encoder = new TextEncoder()
-  return encoder.encode(payload)
 }
 
 serve(async (req) => {
@@ -158,37 +99,60 @@ serve(async (req) => {
         .from('gifts')
         .select('*')
         .eq('notification_scheduled', true)
-        .eq('notification_sent', false)
         .eq('status', 'completed')
         .not('to_user_id', 'is', null)
         .lte('delivery_time', new Date().toISOString())
+        .or('notification_sent.is.null,notification_sent.eq.false')
         .limit(50)
 
       if (error) throw error
       if (scheduledGifts) gifts.push(...scheduledGifts)
     }
 
-    const results = []
+    const results: any[] = []
 
     // Process each gift
     for (const gift of gifts) {
       try {
+        // to_user_id might be stored as email or UUID - try to get user ID
+        let recipientUserId = gift.to_user_id
+        
+        // If to_user_id looks like an email, try to find the user ID
+        if (gift.to_user_id && gift.to_user_id.includes('@')) {
+          const { data: userData } = await supabase.auth.admin.listUsers()
+          const user = userData.users?.find(u => u.email?.toLowerCase() === gift.to_user_id.toLowerCase())
+          recipientUserId = user?.id || gift.to_user_id
+        }
+        
         // Get push subscriptions for the recipient
         const { data: subscriptions, error: subError } = await supabase
           .from('push_subscriptions')
           .select('*')
-          .eq('user_id', gift.to_user_id)
+          .eq('user_id', recipientUserId)
 
-        if (subError) throw subError
+        if (subError) {
+          console.error('Error fetching subscriptions:', subError)
+          continue
+        }
+        
+        if (!subscriptions || subscriptions.length === 0) {
+          console.log(`No push subscriptions found for user ${recipientUserId}`)
+          // Still mark as sent since we tried
+          await supabase
+            .from('gifts')
+            .update({
+              notification_sent: true,
+              notification_sent_at: new Date().toISOString(),
+            })
+            .eq('id', gift.id)
+          continue
+        }
 
         // Get sender information
-        const { data: senderData } = await supabase
-          .from('auth.users')
-          .select('email, raw_user_meta_data')
-          .eq('id', gift.from_user_id)
-          .single()
-
-        const senderName = senderData?.raw_user_meta_data?.name || 'Someone'
+        const { data: senderData } = await supabase.auth.admin.getUserById(gift.from_user_id)
+        const senderName = senderData?.user?.user_metadata?.name || 
+                          senderData?.user?.email?.split('@')[0] || 
+                          'Someone'
 
         // Prepare notification payload
         const notificationPayload = {
@@ -228,23 +192,20 @@ serve(async (req) => {
               },
             }
 
-            // Use web-push npm package (better for production)
-            // For now, using FCM (Firebase Cloud Messaging) as a simpler alternative
-            const response = await sendFCMNotification(
-              subscription.endpoint,
-              notificationPayload
-            )
+            // Send push notification using web-push library
+            const result = await sendWebPush(pushSubscription, notificationPayload)
 
-            if (response.ok) {
+            if (result.success) {
               sentCount++
             } else {
               failedEndpoints.push(subscription.endpoint)
-              // If endpoint is invalid (410 Gone), remove subscription
-              if (response.status === 410) {
+              // If endpoint is invalid (410 Gone or 404), remove subscription
+              if (result.statusCode === 410 || result.statusCode === 404) {
                 await supabase
                   .from('push_subscriptions')
                   .delete()
                   .eq('endpoint', subscription.endpoint)
+                console.log(`Removed invalid subscription: ${subscription.endpoint}`)
               }
             }
           } catch (error) {
@@ -304,55 +265,4 @@ serve(async (req) => {
   }
 })
 
-/**
- * Send notification using Firebase Cloud Messaging (FCM)
- * This is a simpler alternative to raw Web Push with VAPID
- */
-async function sendFCMNotification(
-  endpoint: string,
-  payload: any
-): Promise<Response> {
-  // Extract token from FCM endpoint
-  // FCM endpoints look like: https://fcm.googleapis.com/fcm/send/{token}
-  const fcmServerKey = Deno.env.get('FCM_SERVER_KEY') || ''
-  
-  if (!fcmServerKey) {
-    // Fallback to direct endpoint push
-    return fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'TTL': '86400',
-      },
-      body: JSON.stringify(payload),
-    })
-  }
-
-  // Extract token from endpoint
-  const tokenMatch = endpoint.match(/\/([^\/]+)$/)
-  const token = tokenMatch ? tokenMatch[1] : null
-
-  if (!token) {
-    throw new Error('Invalid FCM endpoint')
-  }
-
-  // Send via FCM API
-  return fetch('https://fcm.googleapis.com/fcm/send', {
-    method: 'POST',
-    headers: {
-      'Authorization': `key=${fcmServerKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      to: token,
-      notification: {
-        title: payload.title,
-        body: payload.body,
-        icon: payload.icon,
-        badge: payload.badge,
-      },
-      data: payload.data,
-    }),
-  })
-}
 

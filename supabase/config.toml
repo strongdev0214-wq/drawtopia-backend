@@ -1,6 +1,16 @@
 # Supabase Configuration File
 # This file is used for local development and deployment
 
+[auth]
+# JWT expiry in seconds (24 hours = 86400 seconds)
+jwt_expiry = 86400
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = false
+
 [functions.send-gift-notification]
-verify_jwt = false  # Set to true if you want JWT verification
+verify_jwt = true  # Enable JWT verification for security
 
