@@ -11,7 +11,7 @@ pip install -r requirements.txt
 
 This installs all required packages including:
 - FastAPI, Uvicorn (web framework)
-- Security packages (slowapi, pyjwt, cryptography, bleach, itsdangerous)
+- Security packages (slowapi, pyjwt, cryptography, bleach)
 - Supabase, Google Gemini, OpenAI clients
 - Image processing (Pillow)
 - PDF generation (reportlab)
@@ -40,7 +40,6 @@ SUPABASE_SERVICE_KEY=your_supabase_service_key
 
 # Security (generate random strings)
 JWT_SECRET=your-secure-random-string
-CSRF_SECRET_KEY=your-secure-random-string
 ENCRYPTION_PASSWORD=your-secure-password
 ENCRYPTION_SALT=your-secure-salt
 ```
@@ -48,7 +47,6 @@ ENCRYPTION_SALT=your-secure-salt
 **Generate secure random strings:**
 ```bash
 python -c "import secrets; print('JWT_SECRET=' + secrets.token_urlsafe(32))"
-python -c "import secrets; print('CSRF_SECRET_KEY=' + secrets.token_urlsafe(32))"
 python -c "import secrets; print('ENCRYPTION_PASSWORD=' + secrets.token_urlsafe(32))"
 python -c "import secrets; print('ENCRYPTION_SALT=' + secrets.token_urlsafe(16))"
 ```
@@ -127,7 +125,6 @@ Expected response:
   "virus_scanner_available": true,  // false if ClamAV not installed
   "security": {
     "rate_limiting": "enabled",
-    "csrf_protection": "enabled",
     "virus_scanning": "enabled"  // or "basic_checks_only"
   }
 }
@@ -139,13 +136,6 @@ Expected response:
 # Test rate limiting
 for i in {1..150}; do curl http://localhost:8000/health; done
 # Should get 429 (Too Many Requests) after limit
-
-# Get CSRF token
-curl http://localhost:8000/api/csrf-token
-
-# Test CSRF protection
-curl -X POST http://localhost:8000/api/books/generate -d '{}'
-# Should get 403 (Forbidden) without CSRF token
 ```
 
 ## Troubleshooting

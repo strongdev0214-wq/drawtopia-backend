@@ -35,7 +35,6 @@ from contextlib import asynccontextmanager
 # Import security utilities
 from rate_limiter import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from csrf_protection import generate_csrf_token, verify_csrf_token, CSRFProtection
 from security_utils import sanitize_input, sanitize_filename, validate_email, validate_phone, encrypt_data, decrypt_data
 from virus_scanner import get_virus_scanner
 import jwt
@@ -170,16 +169,14 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
-    expose_headers=["X-CSRF-Token"]
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=[]
 )
 
 # Add rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# Initialize CSRF protection
-csrf_protection = CSRFProtection()
 
 # Global exception handler for better error handling
 @app.exception_handler(Exception)
@@ -1110,22 +1107,14 @@ async def root(request: Request):
         "health": "/health",
         "security": {
             "rate_limiting": "enabled",
-            "csrf_protection": "enabled",
             "jwt_expiration": f"{JWT_EXPIRATION_HOURS} hours"
         }
     }
 
 
-@app.get("/api/csrf-token")
-@limiter.limit("10/minute")
-async def get_csrf_token(request: Request):
-    """Get CSRF token for form submissions"""
-    token = generate_csrf_token()
-    return {"csrf_token": token}
-
 @app.post("/validate-image-quality/", response_model=QualityValidationResponse)
 @limiter.limit("30/minute")
-async def validate_image_quality_endpoint(http_request: Request, request: ImageRequest, csrf_verified: bool = Depends(verify_csrf_token)):
+async def validate_image_quality_endpoint(http_request: Request, request: ImageRequest):
     """
     Standalone endpoint to validate image quality without editing.
     Useful for pre-validation before processing.
@@ -1171,14 +1160,13 @@ async def health_check(request: Request):
         "virus_scanner_available": scanner.is_available(),
         "security": {
             "rate_limiting": "enabled",
-            "csrf_protection": "enabled",
             "virus_scanning": "enabled" if scanner.is_available() else "basic_checks_only"
         }
     }
 
 @app.post("/edit-image/", response_model=ImageResponse)
 @limiter.limit("20/minute")
-async def edit_image_endpoint(http_request: Request, request: ImageRequest, csrf_verified: bool = Depends(verify_csrf_token)):
+async def edit_image_endpoint(http_request: Request, request: ImageRequest):
     try:
         # Convert HttpUrl to string for processing
         image_url_str = str(request.image_url)
@@ -1239,7 +1227,7 @@ async def edit_image_endpoint(http_request: Request, request: ImageRequest, csrf
 
 @app.post("/edit-image-stream/")
 @limiter.limit("20/minute")
-async def edit_image_stream_endpoint(http_request: Request, request: ImageRequest, csrf_verified: bool = Depends(verify_csrf_token)):
+async def edit_image_stream_endpoint(http_request: Request, request: ImageRequest):
     """Alternative endpoint that returns the image as a stream (for direct download)"""
     try:
         # Convert HttpUrl to string for processing
@@ -1334,7 +1322,7 @@ async def background_worker():
 
 @app.post("/api/books/generate", response_model=JobResponse)
 @limiter.limit("10/minute")
-async def create_book_generation_job(http_request: Request, request: BatchJobRequest, csrf_verified: bool = Depends(verify_csrf_token)):
+async def create_book_generation_job(http_request: Request, request: BatchJobRequest):
     """Create a new book generation job"""
     try:
         if not queue_manager:
@@ -1557,7 +1545,7 @@ async def get_book_preview(request: Request, id: str):
 
 @app.delete("/api/books/{id}")
 @limiter.limit("30/minute")
-async def delete_book(request: Request, id: str, csrf_verified: bool = Depends(verify_csrf_token)):
+async def delete_book(request: Request, id: str):
     """
     Delete a book from the stories table by ID or UID
     
@@ -1902,7 +1890,7 @@ async def get_user_statistics_summary(request: Request):
 
 @app.post("/generate-story/", response_model=StoryResponse)
 @limiter.limit("10/minute")
-async def generate_story_endpoint(http_request: Request, request: StoryRequest, csrf_verified: bool = Depends(verify_csrf_token)):
+async def generate_story_endpoint(http_request: Request, request: StoryRequest):
     """Generate a 5-page children's story based on the provided parameters"""
     try:
         # Validate age_group
@@ -2323,7 +2311,7 @@ async def download_book_pdf(
 
 @app.post("/api/books/{book_id}/generate-pdf", response_model=PDFGenerationResponse)
 @limiter.limit("10/minute")
-async def generate_book_pdf(request: Request, book_id: str, csrf_verified: bool = Depends(verify_csrf_token)):
+async def generate_book_pdf(request: Request, book_id: str):
     """
     Generate PDF on-demand for a book/story
     
@@ -2464,7 +2452,6 @@ async def generate_book_pdf(request: Request, book_id: str, csrf_verified: bool 
 async def record_book_purchase(
     request: Request,
     book_id: int,
-    csrf_verified: bool = Depends(verify_csrf_token),
     user_id: Optional[str] = None,
     transaction_id: Optional[str] = None,
     amount_paid: Optional[float] = None,

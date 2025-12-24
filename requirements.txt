@@ -13,7 +13,6 @@ slowapi>=0.1.9
 pyjwt>=2.8.0
 cryptography>=41.0.0
 bleach>=6.1.0
-itsdangerous>=2.1.2
 
 # Optional: For enhanced virus scanning (requires ClamAV daemon)
 # clamd>=1.0.2
