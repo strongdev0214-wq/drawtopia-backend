@@ -2509,6 +2509,177 @@ async def record_book_purchase(
         raise HTTPException(status_code=500, detail=f"Error recording purchase: {str(e)}")
 
 
+# ==================== STRIPE SUBSCRIPTION ENDPOINTS ====================
+
+# Stripe Configuration
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+# Initialize Stripe
+stripe_client = None
+if STRIPE_SECRET_KEY:
+    try:
+        import stripe
+        stripe.api_key = STRIPE_SECRET_KEY
+        stripe_client = stripe
+        logger.info("✅ Stripe client initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Stripe client: {e}")
+else:
+    logger.warning("⚠️ STRIPE_SECRET_KEY not found. Stripe subscription will be disabled.")
+
+
+class CheckoutSessionRequest(BaseModel):
+    """Request model for creating a Stripe checkout session"""
+    priceId: str
+    successUrl: Optional[str] = None
+    cancelUrl: Optional[str] = None
+    customerEmail: Optional[str] = None
+    metadata: Optional[Dict[str, str]] = None
+
+
+@app.post("/create-checkout-session")
+@limiter.limit("10/minute")
+async def create_checkout_session(request: Request, session_request: CheckoutSessionRequest):
+    """
+    Create a Stripe Checkout Session for subscription
+    
+    This endpoint creates a Stripe Checkout session and returns the URL
+    for redirecting the user to Stripe's hosted payment page.
+    """
+    try:
+        if not stripe_client:
+            raise HTTPException(
+                status_code=503, 
+                detail="Stripe service not configured. Please contact support."
+            )
+        
+        if not session_request.priceId:
+            raise HTTPException(status_code=400, detail="priceId is required")
+        
+        # Build checkout session parameters
+        checkout_params = {
+            "mode": "subscription",
+            "payment_method_types": ["card"],
+            "line_items": [
+                {
+                    "price": session_request.priceId,
+                    "quantity": 1,
+                },
+            ],
+            "success_url": session_request.successUrl or "https://drawtopia.com/subscription/success?session_id={CHECKOUT_SESSION_ID}",
+            "cancel_url": session_request.cancelUrl or "https://drawtopia.com/pricing",
+            "allow_promotion_codes": True,
+            "billing_address_collection": "required",
+        }
+        
+        # Add customer email if provided
+        if session_request.customerEmail:
+            checkout_params["customer_email"] = session_request.customerEmail
+        
+        # Add metadata if provided
+        if session_request.metadata:
+            checkout_params["metadata"] = session_request.metadata
+        
+        # Create the checkout session
+        checkout_session = stripe_client.checkout.Session.create(**checkout_params)
+        
+        logger.info(f"Checkout session created: {checkout_session.id}")
+        
+        return {
+            "success": True,
+            "sessionId": checkout_session.id,
+            "url": checkout_session.url
+        }
+        
+    except stripe_client.error.StripeError as e:
+        logger.error(f"Stripe error creating checkout session: {e}")
+        raise HTTPException(status_code=400, detail=str(e.user_message if hasattr(e, 'user_message') else e))
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating checkout session: {str(e)}")
+
+
+@app.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """
+    Handle Stripe webhook events
+    
+    This endpoint receives webhook events from Stripe for subscription management.
+    """
+    try:
+        if not stripe_client:
+            raise HTTPException(status_code=503, detail="Stripe service not configured")
+        
+        payload = await request.body()
+        sig_header = request.headers.get("stripe-signature")
+        
+        if not sig_header:
+            raise HTTPException(status_code=400, detail="Missing Stripe signature header")
+        
+        # Verify webhook signature if secret is configured
+        event = None
+        if STRIPE_WEBHOOK_SECRET:
+            try:
+                event = stripe_client.Webhook.construct_event(
+                    payload, sig_header, STRIPE_WEBHOOK_SECRET
+                )
+            except ValueError as e:
+                logger.error(f"Invalid payload: {e}")
+                raise HTTPException(status_code=400, detail="Invalid payload")
+            except stripe_client.error.SignatureVerificationError as e:
+                logger.error(f"Invalid signature: {e}")
+                raise HTTPException(status_code=400, detail="Invalid signature")
+        else:
+            # Parse the event without signature verification (not recommended for production)
+            import json
+            event = json.loads(payload)
+            logger.warning("⚠️ Stripe webhook signature verification disabled")
+        
+        event_type = event.get("type", event.type if hasattr(event, 'type') else "unknown")
+        
+        # Handle the event
+        if event_type == "checkout.session.completed":
+            session = event.get("data", {}).get("object", event.data.object if hasattr(event, 'data') else {})
+            customer_email = session.get("customer_email")
+            subscription_id = session.get("subscription")
+            metadata = session.get("metadata", {})
+            user_id = metadata.get("userId")
+            
+            logger.info(f"Subscription created: {subscription_id} for user {user_id or customer_email}")
+            
+            # Here you would update the user's subscription status in your database
+            # For example:
+            # if supabase and user_id:
+            #     supabase.table("user_subscriptions").insert({
+            #         "user_id": user_id,
+            #         "stripe_subscription_id": subscription_id,
+            #         "status": "active",
+            #         "customer_email": customer_email
+            #     }).execute()
+            
+        elif event_type == "customer.subscription.updated":
+            subscription = event.get("data", {}).get("object", event.data.object if hasattr(event, 'data') else {})
+            subscription_id = subscription.get("id")
+            status = subscription.get("status")
+            logger.info(f"Subscription updated: {subscription_id} - status: {status}")
+            
+        elif event_type == "customer.subscription.deleted":
+            subscription = event.get("data", {}).get("object", event.data.object if hasattr(event, 'data') else {})
+            subscription_id = subscription.get("id")
+            logger.info(f"Subscription cancelled: {subscription_id}")
+        
+        return {"success": True, "received": True}
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error processing Stripe webhook: {e}")
+        raise HTTPException(status_code=500, detail=f"Webhook processing error: {str(e)}")
+
+
 if __name__ == "__main__":
     print("🚀 Starting AI Image Editor Server...")
     print("📚 API Documentation: http://localhost:8000/docs")
