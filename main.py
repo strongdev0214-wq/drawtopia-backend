@@ -38,6 +38,7 @@ from slowapi.errors import RateLimitExceeded
 from security_utils import sanitize_input, sanitize_filename, validate_email, validate_phone, encrypt_data, decrypt_data
 from virus_scanner import get_virus_scanner
 import jwt
+import stripe
 
 # Load environment variables
 load_dotenv()
@@ -70,6 +71,21 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
 
 # Production mode check
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
+
+# Stripe Configuration
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PRICE_ID_MONTHLY = os.getenv("STRIPE_PRICE_ID_MONTHLY", "")
+STRIPE_PRICE_ID_YEARLY = os.getenv("STRIPE_PRICE_ID_YEARLY", "")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+# Initialize Stripe
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+    logger.info("✅ Stripe initialized successfully")
+else:
+    logger.warning("⚠️ STRIPE_SECRET_KEY not found. Stripe payments will be disabled.")
 
 # Initialize Gemini client
 gemini_client = None
@@ -2509,53 +2525,67 @@ async def record_book_purchase(
         raise HTTPException(status_code=500, detail=f"Error recording purchase: {str(e)}")
 
 
-# ==================== STRIPE SUBSCRIPTION ENDPOINTS ====================
+# ============================================================================
+# STRIPE SUBSCRIPTION ENDPOINTS
+# ============================================================================
 
-# Stripe Configuration
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+class CreateSubscriptionRequest(BaseModel):
+    """Request model for creating a subscription checkout session"""
+    price_type: str = "monthly"  # "monthly" or "yearly"
+    user_email: Optional[str] = None
+    user_id: Optional[str] = None
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
 
-# Initialize Stripe
-stripe_client = None
-if STRIPE_SECRET_KEY:
-    try:
-        import stripe
-        stripe.api_key = STRIPE_SECRET_KEY
-        stripe_client = stripe
-        logger.info("✅ Stripe client initialized successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Stripe client: {e}")
-else:
-    logger.warning("⚠️ STRIPE_SECRET_KEY not found. Stripe subscription will be disabled.")
+class SubscriptionResponse(BaseModel):
+    """Response model for subscription operations"""
+    success: bool
+    checkout_url: Optional[str] = None
+    session_id: Optional[str] = None
+    message: Optional[str] = None
+
+class SubscriptionStatusResponse(BaseModel):
+    """Response model for subscription status"""
+    success: bool
+    is_active: bool = False
+    subscription_id: Optional[str] = None
+    status: Optional[str] = None
+    current_period_end: Optional[str] = None
+    plan_type: Optional[str] = None
+    message: Optional[str] = None
+
+class CustomerPortalResponse(BaseModel):
+    """Response model for customer portal"""
+    success: bool
+    portal_url: Optional[str] = None
+    message: Optional[str] = None
 
 
-class CheckoutSessionRequest(BaseModel):
-    """Request model for creating a Stripe checkout session"""
-    priceId: str
-    successUrl: Optional[str] = None
-    cancelUrl: Optional[str] = None
-    customerEmail: Optional[str] = None
-    metadata: Optional[Dict[str, str]] = None
-
-
-@app.post("/create-checkout-session")
-@limiter.limit("10/minute")
-async def create_checkout_session(request: Request, session_request: CheckoutSessionRequest):
+@app.post("/api/stripe/create-subscription-checkout", response_model=SubscriptionResponse)
+async def create_subscription_checkout(request: CreateSubscriptionRequest):
     """
-    Create a Stripe Checkout Session for subscription
+    Create a Stripe Checkout Session for subscription.
+    This redirects the user to Stripe's hosted checkout page.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
     
-    This endpoint creates a Stripe Checkout session and returns the URL
-    for redirecting the user to Stripe's hosted payment page.
-    """
     try:
-        if not stripe_client:
+        # Determine which price ID to use
+        if request.price_type == "yearly":
+            price_id = STRIPE_PRICE_ID_YEARLY
+        else:
+            price_id = STRIPE_PRICE_ID_MONTHLY
+        
+        if not price_id:
             raise HTTPException(
-                status_code=503, 
-                detail="Stripe service not configured. Please contact support."
+                status_code=400, 
+                detail=f"Price ID for {request.price_type} subscription is not configured"
             )
         
-        if not session_request.priceId:
-            raise HTTPException(status_code=400, detail="priceId is required")
+        # Set success and cancel URLs
+        success_url = request.success_url or f"{FRONTEND_URL}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = request.cancel_url or f"{FRONTEND_URL}/pricing"
         
         # Build checkout session parameters
         checkout_params = {
@@ -2563,121 +2593,345 @@ async def create_checkout_session(request: Request, session_request: CheckoutSes
             "payment_method_types": ["card"],
             "line_items": [
                 {
-                    "price": session_request.priceId,
+                    "price": price_id,
                     "quantity": 1,
-                },
+                }
             ],
-            "success_url": session_request.successUrl or "https://drawtopia.com/subscription/success?session_id={CHECKOUT_SESSION_ID}",
-            "cancel_url": session_request.cancelUrl or "https://drawtopia.com/pricing",
+            "success_url": success_url,
+            "cancel_url": cancel_url,
             "allow_promotion_codes": True,
-            "billing_address_collection": "required",
+            "billing_address_collection": "auto",
         }
         
         # Add customer email if provided
-        if session_request.customerEmail:
-            checkout_params["customer_email"] = session_request.customerEmail
+        if request.user_email:
+            checkout_params["customer_email"] = request.user_email
         
-        # Add metadata if provided
-        if session_request.metadata:
-            checkout_params["metadata"] = session_request.metadata
-        
-        # Create the checkout session
-        checkout_session = stripe_client.checkout.Session.create(**checkout_params)
-        
-        logger.info(f"Checkout session created: {checkout_session.id}")
-        
-        return {
-            "success": True,
-            "sessionId": checkout_session.id,
-            "url": checkout_session.url
+        # Add metadata for tracking
+        checkout_params["metadata"] = {
+            "user_id": request.user_id or "",
+            "price_type": request.price_type,
+            "source": "drawtopia_pricing_page"
         }
         
-    except stripe_client.error.StripeError as e:
+        # Create the checkout session
+        checkout_session = stripe.checkout.Session.create(**checkout_params)
+        
+        logger.info(f"Created Stripe checkout session: {checkout_session.id}")
+        
+        return SubscriptionResponse(
+            success=True,
+            checkout_url=checkout_session.url,
+            session_id=checkout_session.id
+        )
+        
+    except stripe.error.StripeError as e:
         logger.error(f"Stripe error creating checkout session: {e}")
-        raise HTTPException(status_code=400, detail=str(e.user_message if hasattr(e, 'user_message') else e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating subscription checkout: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {str(e)}")
+
+
+@app.get("/api/stripe/subscription-status/{user_id}", response_model=SubscriptionStatusResponse)
+async def get_subscription_status(user_id: str):
+    """
+    Get the subscription status for a user.
+    Checks the subscriptions table in Supabase.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    
+    try:
+        # Query the subscriptions table for this user
+        response = supabase.table("subscriptions").select("*").eq("user_id", user_id).eq("status", "active").execute()
+        
+        if response.data and len(response.data) > 0:
+            subscription = response.data[0]
+            return SubscriptionStatusResponse(
+                success=True,
+                is_active=True,
+                subscription_id=subscription.get("stripe_subscription_id"),
+                status=subscription.get("status"),
+                current_period_end=subscription.get("current_period_end"),
+                plan_type=subscription.get("plan_type")
+            )
+        else:
+            return SubscriptionStatusResponse(
+                success=True,
+                is_active=False,
+                message="No active subscription found"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error checking subscription status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to check subscription status: {str(e)}")
+
+
+@app.post("/api/stripe/create-customer-portal", response_model=CustomerPortalResponse)
+async def create_customer_portal(user_id: str, return_url: Optional[str] = None):
+    """
+    Create a Stripe Customer Portal session for managing subscriptions.
+    Allows users to update payment method, cancel subscription, etc.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    
+    try:
+        # Get the customer ID from subscriptions table
+        response = supabase.table("subscriptions").select("stripe_customer_id").eq("user_id", user_id).execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(status_code=404, detail="No subscription found for this user")
+        
+        customer_id = response.data[0].get("stripe_customer_id")
+        if not customer_id:
+            raise HTTPException(status_code=404, detail="Customer ID not found")
+        
+        # Create the portal session
+        portal_session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=return_url or f"{FRONTEND_URL}/dashboard"
+        )
+        
+        return CustomerPortalResponse(
+            success=True,
+            portal_url=portal_session.url
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating portal session: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error creating checkout session: {e}")
-        raise HTTPException(status_code=500, detail=f"Error creating checkout session: {str(e)}")
+        logger.error(f"Error creating customer portal: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create customer portal: {str(e)}")
 
 
-@app.post("/webhook/stripe")
+@app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
     """
-    Handle Stripe webhook events
-    
-    This endpoint receives webhook events from Stripe for subscription management.
+    Handle Stripe webhook events.
+    This endpoint receives events from Stripe about subscription changes.
     """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    # Get the raw body and signature
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    
     try:
-        if not stripe_client:
-            raise HTTPException(status_code=503, detail="Stripe service not configured")
-        
-        payload = await request.body()
-        sig_header = request.headers.get("stripe-signature")
-        
-        if not sig_header:
-            raise HTTPException(status_code=400, detail="Missing Stripe signature header")
-        
-        # Verify webhook signature if secret is configured
-        event = None
+        # Verify the webhook signature if secret is configured
         if STRIPE_WEBHOOK_SECRET:
-            try:
-                event = stripe_client.Webhook.construct_event(
-                    payload, sig_header, STRIPE_WEBHOOK_SECRET
-                )
-            except ValueError as e:
-                logger.error(f"Invalid payload: {e}")
-                raise HTTPException(status_code=400, detail="Invalid payload")
-            except stripe_client.error.SignatureVerificationError as e:
-                logger.error(f"Invalid signature: {e}")
-                raise HTTPException(status_code=400, detail="Invalid signature")
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, STRIPE_WEBHOOK_SECRET
+            )
         else:
-            # Parse the event without signature verification (not recommended for production)
-            import json
-            event = json.loads(payload)
-            logger.warning("⚠️ Stripe webhook signature verification disabled")
+            # For development, parse without verification
+            event = stripe.Event.construct_from(
+                json.loads(payload), stripe.api_key
+            )
         
-        event_type = event.get("type", event.type if hasattr(event, 'type') else "unknown")
+        event_type = event["type"]
+        event_data = event["data"]["object"]
         
-        # Handle the event
+        logger.info(f"Received Stripe webhook: {event_type}")
+        
+        # Handle different event types
         if event_type == "checkout.session.completed":
-            session = event.get("data", {}).get("object", event.data.object if hasattr(event, 'data') else {})
-            customer_email = session.get("customer_email")
-            subscription_id = session.get("subscription")
-            metadata = session.get("metadata", {})
-            user_id = metadata.get("userId")
-            
-            logger.info(f"Subscription created: {subscription_id} for user {user_id or customer_email}")
-            
-            # Here you would update the user's subscription status in your database
-            # For example:
-            # if supabase and user_id:
-            #     supabase.table("user_subscriptions").insert({
-            #         "user_id": user_id,
-            #         "stripe_subscription_id": subscription_id,
-            #         "status": "active",
-            #         "customer_email": customer_email
-            #     }).execute()
-            
+            await handle_checkout_completed(event_data)
+        elif event_type == "customer.subscription.created":
+            await handle_subscription_created(event_data)
         elif event_type == "customer.subscription.updated":
-            subscription = event.get("data", {}).get("object", event.data.object if hasattr(event, 'data') else {})
-            subscription_id = subscription.get("id")
-            status = subscription.get("status")
-            logger.info(f"Subscription updated: {subscription_id} - status: {status}")
-            
+            await handle_subscription_updated(event_data)
         elif event_type == "customer.subscription.deleted":
-            subscription = event.get("data", {}).get("object", event.data.object if hasattr(event, 'data') else {})
-            subscription_id = subscription.get("id")
-            logger.info(f"Subscription cancelled: {subscription_id}")
+            await handle_subscription_deleted(event_data)
+        elif event_type == "invoice.payment_succeeded":
+            await handle_payment_succeeded(event_data)
+        elif event_type == "invoice.payment_failed":
+            await handle_payment_failed(event_data)
+        else:
+            logger.info(f"Unhandled webhook event type: {event_type}")
         
-        return {"success": True, "received": True}
+        return {"status": "success"}
         
-    except HTTPException as e:
-        raise e
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
-        logger.error(f"Error processing Stripe webhook: {e}")
+        logger.error(f"Error processing webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Webhook processing error: {str(e)}")
+
+
+async def handle_checkout_completed(session):
+    """Handle successful checkout session completion"""
+    try:
+        if session.get("mode") != "subscription":
+            return
+        
+        customer_id = session.get("customer")
+        subscription_id = session.get("subscription")
+        customer_email = session.get("customer_email") or session.get("customer_details", {}).get("email")
+        metadata = session.get("metadata", {})
+        user_id = metadata.get("user_id")
+        price_type = metadata.get("price_type", "monthly")
+        
+        logger.info(f"Checkout completed for subscription {subscription_id}")
+        
+        # Get subscription details from Stripe
+        subscription = stripe.Subscription.retrieve(subscription_id)
+        
+        # Save to database
+        if supabase:
+            subscription_data = {
+                "user_id": user_id if user_id else None,
+                "stripe_customer_id": customer_id,
+                "stripe_subscription_id": subscription_id,
+                "customer_email": customer_email,
+                "status": subscription.status,
+                "plan_type": price_type,
+                "current_period_start": datetime.fromtimestamp(subscription.current_period_start).isoformat(),
+                "current_period_end": datetime.fromtimestamp(subscription.current_period_end).isoformat(),
+                "created_at": datetime.utcnow().isoformat()
+            }
+            
+            # Upsert subscription record
+            supabase.table("subscriptions").upsert(
+                subscription_data,
+                on_conflict="stripe_subscription_id"
+            ).execute()
+            
+            logger.info(f"Saved subscription {subscription_id} to database")
+            
+    except Exception as e:
+        logger.error(f"Error handling checkout completed: {e}")
+
+
+async def handle_subscription_created(subscription):
+    """Handle subscription created event"""
+    try:
+        subscription_id = subscription.get("id")
+        customer_id = subscription.get("customer")
+        status = subscription.get("status")
+        
+        logger.info(f"Subscription created: {subscription_id} with status {status}")
+        
+        if supabase:
+            # Check if subscription already exists
+            existing = supabase.table("subscriptions").select("id").eq("stripe_subscription_id", subscription_id).execute()
+            
+            if not existing.data or len(existing.data) == 0:
+                # Create new subscription record
+                subscription_data = {
+                    "stripe_customer_id": customer_id,
+                    "stripe_subscription_id": subscription_id,
+                    "status": status,
+                    "current_period_start": datetime.fromtimestamp(subscription.get("current_period_start", 0)).isoformat(),
+                    "current_period_end": datetime.fromtimestamp(subscription.get("current_period_end", 0)).isoformat(),
+                    "created_at": datetime.utcnow().isoformat()
+                }
+                supabase.table("subscriptions").insert(subscription_data).execute()
+                
+    except Exception as e:
+        logger.error(f"Error handling subscription created: {e}")
+
+
+async def handle_subscription_updated(subscription):
+    """Handle subscription updated event"""
+    try:
+        subscription_id = subscription.get("id")
+        status = subscription.get("status")
+        
+        logger.info(f"Subscription updated: {subscription_id} to status {status}")
+        
+        if supabase:
+            update_data = {
+                "status": status,
+                "current_period_start": datetime.fromtimestamp(subscription.get("current_period_start", 0)).isoformat(),
+                "current_period_end": datetime.fromtimestamp(subscription.get("current_period_end", 0)).isoformat(),
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            
+            supabase.table("subscriptions").update(update_data).eq("stripe_subscription_id", subscription_id).execute()
+            
+    except Exception as e:
+        logger.error(f"Error handling subscription updated: {e}")
+
+
+async def handle_subscription_deleted(subscription):
+    """Handle subscription cancelled/deleted event"""
+    try:
+        subscription_id = subscription.get("id")
+        
+        logger.info(f"Subscription deleted: {subscription_id}")
+        
+        if supabase:
+            supabase.table("subscriptions").update({
+                "status": "cancelled",
+                "cancelled_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat()
+            }).eq("stripe_subscription_id", subscription_id).execute()
+            
+    except Exception as e:
+        logger.error(f"Error handling subscription deleted: {e}")
+
+
+async def handle_payment_succeeded(invoice):
+    """Handle successful payment"""
+    try:
+        subscription_id = invoice.get("subscription")
+        if subscription_id:
+            logger.info(f"Payment succeeded for subscription: {subscription_id}")
+            
+            if supabase:
+                supabase.table("subscriptions").update({
+                    "status": "active",
+                    "last_payment_date": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.utcnow().isoformat()
+                }).eq("stripe_subscription_id", subscription_id).execute()
+                
+    except Exception as e:
+        logger.error(f"Error handling payment succeeded: {e}")
+
+
+async def handle_payment_failed(invoice):
+    """Handle failed payment"""
+    try:
+        subscription_id = invoice.get("subscription")
+        if subscription_id:
+            logger.info(f"Payment failed for subscription: {subscription_id}")
+            
+            if supabase:
+                supabase.table("subscriptions").update({
+                    "status": "past_due",
+                    "updated_at": datetime.utcnow().isoformat()
+                }).eq("stripe_subscription_id", subscription_id).execute()
+                
+    except Exception as e:
+        logger.error(f"Error handling payment failed: {e}")
+
+
+@app.get("/api/stripe/config")
+async def get_stripe_config():
+    """
+    Get Stripe publishable key for frontend.
+    """
+    if not STRIPE_PUBLISHABLE_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    return {
+        "publishable_key": STRIPE_PUBLISHABLE_KEY,
+        "monthly_price_id": STRIPE_PRICE_ID_MONTHLY,
+        "yearly_price_id": STRIPE_PRICE_ID_YEARLY
+    }
 
 
 if __name__ == "__main__":
