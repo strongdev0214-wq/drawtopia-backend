@@ -1105,7 +1105,7 @@ def extract_user_from_token(authorization: Optional[str]) -> Optional[str]:
             token = authorization[7:]
             payload = verify_jwt_token(token)
             if payload:
-                return payload.get("user_id")
+                return payload.get("stripe_subscription_id")
     except Exception as e:
         logger.warning(f"Error extracting user from token: {e}")
     
