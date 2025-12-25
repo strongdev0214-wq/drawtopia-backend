@@ -2798,8 +2798,8 @@ async def handle_checkout_completed(session):
                 "customer_email": customer_email,
                 "status": subscription.status,
                 "plan_type": price_type,
-                "current_period_start": datetime.fromtimestamp(subscription.current_period_start).isoformat(),
-                "current_period_end": datetime.fromtimestamp(subscription.current_period_end).isoformat(),
+                "current_period_start": datetime.utcnow().isoformat() + "Z",
+                "current_period_end": datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z",
                 "created_at": datetime.utcnow().isoformat()
             }
             
@@ -2835,7 +2835,7 @@ async def handle_subscription_created(subscription):
                     "stripe_subscription_id": subscription_id,
                     "status": status,
                     "current_period_start": datetime.utcnow().isoformat() + "Z",
-                    "current_period_end": datetime.utcnow().replace(month=datetime.utcnow().month + 1).isoformat() + "Z",
+                    "current_period_end": datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z",
                     "created_at": datetime.utcnow().isoformat()
                 }
                 supabase.table("subscriptions").insert(subscription_data).execute()
