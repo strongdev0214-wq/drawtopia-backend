@@ -29,6 +29,12 @@ from queue_manager import QueueManager
 from batch_processor import BatchProcessor
 from validation_utils import ConsistencyValidationResult
 from audio_generator import AudioGenerator
+from email_service import (
+    email_service,
+    send_payment_success,
+    send_payment_failed,
+    send_subscription_cancelled
+)
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -37,14 +43,6 @@ from rate_limiter import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from security_utils import sanitize_input, sanitize_filename, validate_email, validate_phone, encrypt_data, decrypt_data
 from virus_scanner import get_virus_scanner
-from email_service import (
-    send_payment_success_email,
-    send_payment_failed_email,
-    send_subscription_activation_email,
-    send_subscription_cancellation_email,
-    get_customer_info_from_db,
-    get_customer_email_from_stripe
-)
 import jwt
 import stripe
 
@@ -3204,11 +3202,6 @@ async def handle_checkout_completed(session):
         # Get subscription details from Stripe
         subscription = stripe.Subscription.retrieve(subscription_id)
         
-        # Calculate subscription end date
-        subscription_end_date = datetime.utcnow().replace(
-            month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1
-        ).strftime("%B %d, %Y")
-        
         # Save to database
         if supabase:
             subscription_data = {
@@ -3230,23 +3223,6 @@ async def handle_checkout_completed(session):
             ).execute()
             
             logger.info(f"Saved subscription {subscription_id} to database")
-        
-        # Send subscription activation email
-        if customer_email:
-            customer_name = None
-            if supabase and user_id:
-                customer_info = await get_customer_info_from_db(supabase, user_id=user_id)
-                if customer_info:
-                    customer_name = customer_info.get("name")
-            
-            await send_subscription_activation_email(
-                to_email=customer_email,
-                customer_name=customer_name,
-                plan_type=price_type,
-                subscription_start_date=datetime.utcnow().strftime("%B %d, %Y"),
-                subscription_end_date=subscription_end_date
-            )
-            logger.info(f"Subscription activation email sent to {customer_email}")
             
     except Exception as e:
         logger.error(f"Error handling checkout completed: {e}")
@@ -3341,28 +3317,35 @@ async def handle_subscription_deleted(subscription):
     try:
         subscription_id = subscription.get("id")
         customer_id = subscription.get("customer")
-        current_period_end = subscription.get("current_period_end")
         
         logger.info(f"Subscription deleted: {subscription_id}")
         
-        # Calculate access end date if available
-        access_end_date = None
-        if current_period_end:
-            try:
-                access_end_date = datetime.fromtimestamp(current_period_end).strftime("%B %d, %Y")
-            except Exception:
-                pass
+        # Get plan type and period end
+        plan_type = "monthly"
+        access_until = None
+        try:
+            current_period_end = subscription.get("current_period_end")
+            if current_period_end:
+                access_until = datetime.fromtimestamp(current_period_end).strftime("%B %d, %Y")
+            
+            if subscription.get("items", {}).get("data"):
+                price = subscription["items"]["data"][0].get("price", {})
+                interval = price.get("recurring", {}).get("interval", "month")
+                plan_type = "yearly" if interval == "year" else "monthly"
+        except Exception:
+            pass
         
         customer_email = None
         customer_name = None
-        plan_type = "monthly"
         
         if supabase:
-            # Get subscription info first for plan type
-            sub_result = supabase.table("subscriptions").select("plan_type, customer_email").eq("stripe_subscription_id", subscription_id).execute()
-            if sub_result.data and len(sub_result.data) > 0:
-                plan_type = sub_result.data[0].get("plan_type", "monthly")
-                customer_email = sub_result.data[0].get("customer_email")
+            # Get email from subscription record
+            try:
+                sub_result = supabase.table("subscriptions").select("customer_email").eq("stripe_subscription_id", subscription_id).execute()
+                if sub_result.data:
+                    customer_email = sub_result.data[0].get("customer_email")
+            except Exception:
+                pass
             
             supabase.table("subscriptions").update({
                 "status": "cancelled",
@@ -3371,13 +3354,16 @@ async def handle_subscription_deleted(subscription):
             }).eq("stripe_subscription_id", subscription_id).execute()
             
             # Update users table - find user by stripe_customer_id
-            user_result = supabase.table("users").select("id, email, full_name, username").eq("stripe_customer_id", customer_id).execute()
+            user_result = supabase.table("users").select("id, email, name").eq("stripe_customer_id", customer_id).execute()
             
             if user_result.data and len(user_result.data) > 0:
                 user_data = user_result.data[0]
                 user_id = user_data.get("id")
-                customer_email = customer_email or user_data.get("email")
-                customer_name = user_data.get("full_name") or user_data.get("username")
+                
+                # Get email from user if not found in subscription
+                if not customer_email:
+                    customer_email = user_data.get("email")
+                customer_name = user_data.get("name")
                 
                 user_update_data = {
                     "subscription_status": "cancelled",
@@ -3387,20 +3373,15 @@ async def handle_subscription_deleted(subscription):
                 supabase.table("users").update(user_update_data).eq("id", user_id).execute()
                 logger.info(f"Updated user {user_id} with cancelled subscription status")
         
-        # Get customer email from Stripe if not found
-        if not customer_email and customer_id:
-            customer_email = await get_customer_email_from_stripe(customer_id)
-        
-        # Send subscription cancellation email
-        if customer_email:
-            await send_subscription_cancellation_email(
+        # Send subscription cancelled email
+        if customer_email and email_service.is_enabled():
+            await send_subscription_cancelled(
                 to_email=customer_email,
                 customer_name=customer_name,
                 plan_type=plan_type,
-                cancellation_date=datetime.utcnow().strftime("%B %d, %Y"),
-                access_end_date=access_end_date
+                access_until=access_until
             )
-            logger.info(f"Subscription cancellation email sent to {customer_email}")
+            logger.info(f"Sent subscription cancelled email to {customer_email}")
             
     except Exception as e:
         logger.error(f"Error handling subscription deleted: {e}")
@@ -3411,22 +3392,43 @@ async def handle_payment_succeeded(invoice):
     try:
         subscription_id = invoice.get("subscription")
         customer_id = invoice.get("customer")
-        amount_paid = invoice.get("amount_paid", 0)  # Amount in cents
-        currency = invoice.get("currency", "usd").upper()
         customer_email = invoice.get("customer_email")
+        customer_name = invoice.get("customer_name")
+        amount_paid = invoice.get("amount_paid", 0)
         
         if subscription_id:
             logger.info(f"Payment succeeded for subscription: {subscription_id}")
             
-            customer_name = None
+            # Get subscription details from Stripe
             plan_type = "monthly"
-            subscription_end_date = None
+            next_billing_date = None
+            try:
+                stripe_subscription = stripe.Subscription.retrieve(subscription_id)
+                subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z"
+                
+                # Determine plan type from price interval
+                if stripe_subscription.get("items", {}).get("data"):
+                    price = stripe_subscription["items"]["data"][0].get("price", {})
+                    interval = price.get("recurring", {}).get("interval", "month")
+                    plan_type = "yearly" if interval == "year" else "monthly"
+                
+                # Get next billing date
+                current_period_end = stripe_subscription.get("current_period_end")
+                if current_period_end:
+                    next_billing_date = datetime.fromtimestamp(current_period_end).strftime("%B %d, %Y")
+            except Exception as e:
+                logger.warning(f"Could not retrieve subscription details: {e}")
+                subscription_expires = None
             
             if supabase:
-                # Get subscription info for plan type
-                sub_result = supabase.table("subscriptions").select("plan_type").eq("stripe_subscription_id", subscription_id).execute()
-                if sub_result.data and len(sub_result.data) > 0:
-                    plan_type = sub_result.data[0].get("plan_type", "monthly")
+                # Get customer email from subscription if not in invoice
+                if not customer_email:
+                    try:
+                        sub_result = supabase.table("subscriptions").select("customer_email").eq("stripe_subscription_id", subscription_id).execute()
+                        if sub_result.data:
+                            customer_email = sub_result.data[0].get("customer_email")
+                    except Exception:
+                        pass
                 
                 supabase.table("subscriptions").update({
                     "status": "active",
@@ -3436,23 +3438,17 @@ async def handle_payment_succeeded(invoice):
                 
                 # Update users table with active status on successful payment
                 if customer_id:
-                    # Get subscription details for new period end date
-                    try:
-                        stripe_subscription = stripe.Subscription.retrieve(subscription_id)
-                        current_period_end = stripe_subscription.get("current_period_end")
-                        if current_period_end:
-                            subscription_end_date = datetime.fromtimestamp(current_period_end).strftime("%B %d, %Y")
-                        subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z",
-                    except Exception:
-                        subscription_expires = None
-                    
-                    user_result = supabase.table("users").select("id, email, full_name, username").eq("stripe_customer_id", customer_id).execute()
+                    user_result = supabase.table("users").select("id, email, name").eq("stripe_customer_id", customer_id).execute()
                     
                     if user_result.data and len(user_result.data) > 0:
                         user_data = user_result.data[0]
                         user_id = user_data.get("id")
-                        customer_email = customer_email or user_data.get("email")
-                        customer_name = user_data.get("full_name") or user_data.get("username")
+                        
+                        # Use user email if invoice email not available
+                        if not customer_email:
+                            customer_email = user_data.get("email")
+                        if not customer_name:
+                            customer_name = user_data.get("name")
                         
                         user_update_data = {
                             "subscription_status": "active",
@@ -3462,22 +3458,17 @@ async def handle_payment_succeeded(invoice):
                         supabase.table("users").update(user_update_data).eq("id", user_id).execute()
                         logger.info(f"Updated user {user_id} with active subscription on payment success")
             
-            # Get customer email from Stripe if not found
-            if not customer_email and customer_id:
-                customer_email = await get_customer_email_from_stripe(customer_id)
-            
             # Send payment success email
-            if customer_email:
-                await send_payment_success_email(
+            if customer_email and email_service.is_enabled():
+                amount_display = f"${amount_paid / 100:.2f}" if amount_paid else None
+                await send_payment_success(
                     to_email=customer_email,
                     customer_name=customer_name,
-                    amount=amount_paid / 100,  # Convert cents to dollars
-                    currency=currency,
                     plan_type=plan_type,
-                    transaction_id=invoice.get("id"),
-                    subscription_end_date=subscription_end_date
+                    amount=amount_display,
+                    next_billing_date=next_billing_date
                 )
-                logger.info(f"Payment success email sent to {customer_email}")
+                logger.info(f"Sent payment success email to {customer_email}")
                 
     except Exception as e:
         logger.error(f"Error handling payment succeeded: {e}")
@@ -3488,61 +3479,59 @@ async def handle_payment_failed(invoice):
     try:
         subscription_id = invoice.get("subscription")
         customer_id = invoice.get("customer")
-        amount_due = invoice.get("amount_due", 0)  # Amount in cents
-        currency = invoice.get("currency", "usd").upper()
         customer_email = invoice.get("customer_email")
-        
-        # Get failure reason from the charge if available
-        failure_reason = None
-        charge = invoice.get("charge")
-        if charge:
-            try:
-                charge_obj = stripe.Charge.retrieve(charge)
-                failure_reason = charge_obj.get("failure_message")
-            except Exception:
-                pass
+        customer_name = invoice.get("customer_name")
+        amount_due = invoice.get("amount_due", 0)
         
         if subscription_id:
             logger.info(f"Payment failed for subscription: {subscription_id}")
             
-            customer_name = None
+            # Get plan type
             plan_type = "monthly"
+            try:
+                stripe_subscription = stripe.Subscription.retrieve(subscription_id)
+                if stripe_subscription.get("items", {}).get("data"):
+                    price = stripe_subscription["items"]["data"][0].get("price", {})
+                    interval = price.get("recurring", {}).get("interval", "month")
+                    plan_type = "yearly" if interval == "year" else "monthly"
+            except Exception:
+                pass
             
             if supabase:
-                # Get subscription info for plan type
-                sub_result = supabase.table("subscriptions").select("plan_type").eq("stripe_subscription_id", subscription_id).execute()
-                if sub_result.data and len(sub_result.data) > 0:
-                    plan_type = sub_result.data[0].get("plan_type", "monthly")
+                # Get customer email from subscription or user if not in invoice
+                if not customer_email:
+                    try:
+                        sub_result = supabase.table("subscriptions").select("customer_email").eq("stripe_subscription_id", subscription_id).execute()
+                        if sub_result.data:
+                            customer_email = sub_result.data[0].get("customer_email")
+                    except Exception:
+                        pass
+                
+                if not customer_email and customer_id:
+                    try:
+                        user_result = supabase.table("users").select("email, name").eq("stripe_customer_id", customer_id).execute()
+                        if user_result.data:
+                            customer_email = user_result.data[0].get("email")
+                            if not customer_name:
+                                customer_name = user_result.data[0].get("name")
+                    except Exception:
+                        pass
                 
                 supabase.table("subscriptions").update({
                     "status": "past_due",
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq("stripe_subscription_id", subscription_id).execute()
-                
-                # Get user info for email
-                if customer_id:
-                    user_result = supabase.table("users").select("id, email, full_name, username").eq("stripe_customer_id", customer_id).execute()
-                    
-                    if user_result.data and len(user_result.data) > 0:
-                        user_data = user_result.data[0]
-                        customer_email = customer_email or user_data.get("email")
-                        customer_name = user_data.get("full_name") or user_data.get("username")
-            
-            # Get customer email from Stripe if not found
-            if not customer_email and customer_id:
-                customer_email = await get_customer_email_from_stripe(customer_id)
             
             # Send payment failed email
-            if customer_email:
-                await send_payment_failed_email(
+            if customer_email and email_service.is_enabled():
+                amount_display = f"${amount_due / 100:.2f}" if amount_due else None
+                await send_payment_failed(
                     to_email=customer_email,
                     customer_name=customer_name,
-                    amount=amount_due / 100,  # Convert cents to dollars
-                    currency=currency,
                     plan_type=plan_type,
-                    failure_reason=failure_reason
+                    amount=amount_display
                 )
-                logger.info(f"Payment failed email sent to {customer_email}")
+                logger.info(f"Sent payment failed email to {customer_email}")
                 
     except Exception as e:
         logger.error(f"Error handling payment failed: {e}")
