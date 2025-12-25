@@ -3354,7 +3354,7 @@ async def handle_subscription_deleted(subscription):
             }).eq("stripe_subscription_id", subscription_id).execute()
             
             # Update users table - find user by stripe_customer_id
-            user_result = supabase.table("users").select("id, email, name").eq("stripe_customer_id", customer_id).execute()
+            user_result = supabase.table("users").select("id, email").eq("stripe_customer_id", customer_id).execute()
             
             if user_result.data and len(user_result.data) > 0:
                 user_data = user_result.data[0]
@@ -3363,7 +3363,6 @@ async def handle_subscription_deleted(subscription):
                 # Get email from user if not found in subscription
                 if not customer_email:
                     customer_email = user_data.get("email")
-                customer_name = user_data.get("name")
                 
                 user_update_data = {
                     "subscription_status": "cancelled",
@@ -3438,7 +3437,7 @@ async def handle_payment_succeeded(invoice):
                 
                 # Update users table with active status on successful payment
                 if customer_id:
-                    user_result = supabase.table("users").select("id, email, name").eq("stripe_customer_id", customer_id).execute()
+                    user_result = supabase.table("users").select("id, email").eq("stripe_customer_id", customer_id).execute()
                     
                     if user_result.data and len(user_result.data) > 0:
                         user_data = user_result.data[0]
@@ -3447,8 +3446,6 @@ async def handle_payment_succeeded(invoice):
                         # Use user email if invoice email not available
                         if not customer_email:
                             customer_email = user_data.get("email")
-                        if not customer_name:
-                            customer_name = user_data.get("name")
                         
                         user_update_data = {
                             "subscription_status": "active",
@@ -3509,11 +3506,9 @@ async def handle_payment_failed(invoice):
                 
                 if not customer_email and customer_id:
                     try:
-                        user_result = supabase.table("users").select("email, name").eq("stripe_customer_id", customer_id).execute()
+                        user_result = supabase.table("users").select("email").eq("stripe_customer_id", customer_id).execute()
                         if user_result.data:
                             customer_email = user_result.data[0].get("email")
-                            if not customer_name:
-                                customer_name = user_result.data[0].get("name")
                     except Exception:
                         pass
                 
