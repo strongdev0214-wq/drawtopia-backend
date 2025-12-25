@@ -2840,21 +2840,22 @@ async def handle_subscription_created(subscription):
                 }
                 supabase.table("subscriptions").insert(subscription_data).execute()
             
-            # Update users table - find user by stripe_customer_id
-            user_result = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
+            # Update users table - find user_id from subscriptions table
+            sub_result = supabase.table("subscriptions").select("user_id").eq("stripe_subscription_id", subscription_id).execute()
             
-            if user_result.data and len(user_result.data) > 0:
-                user_id = user_result.data[0].get("id")
-                subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z"
-                
-                user_update_data = {
-                    "subscription_status": status,
-                    "stripe_customer_id": customer_id,
-                    "subscription_expires": subscription_expires
-                }
-                
-                supabase.table("users").update(user_update_data).eq("id", user_id).execute()
-                logger.info(f"Updated user {user_id} with subscription info from subscription created event")
+            if sub_result.data and len(sub_result.data) > 0:
+                user_id = sub_result.data[0].get("user_id")
+                if user_id:
+                    subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z"
+                    
+                    user_update_data = {
+                        "subscription_status": status,
+                        "stripe_customer_id": customer_id,
+                        "subscription_expires": subscription_expires
+                    }
+                    
+                    supabase.table("users").update(user_update_data).eq("id", user_id).execute()
+                    logger.info(f"Updated user {user_id} with subscription info from subscription created event")
                 
     except Exception as e:
         logger.error(f"Error handling subscription created: {e}")
@@ -2866,7 +2867,6 @@ async def handle_subscription_updated(subscription):
         subscription_id = subscription.get("id")
         customer_id = subscription.get("customer")
         status = subscription.get("status")
-        current_period_end = subscription.get("current_period_end")
         
         logger.info(f"Subscription updated: {subscription_id} to status {status}")
         
@@ -2880,20 +2880,21 @@ async def handle_subscription_updated(subscription):
             
             supabase.table("subscriptions").update(update_data).eq("stripe_subscription_id", subscription_id).execute()
             
-            # Update users table - find user by stripe_customer_id
-            user_result = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
+            # Update users table - find user_id from subscriptions table
+            sub_result = supabase.table("subscriptions").select("user_id").eq("stripe_subscription_id", subscription_id).execute()
             
-            if user_result.data and len(user_result.data) > 0:
-                user_id = user_result.data[0].get("id")
-                subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z",
-                
-                user_update_data = {
-                    "subscription_status": status,
-                    "subscription_expires": subscription_expires
-                }
-                
-                supabase.table("users").update(user_update_data).eq("id", user_id).execute()
-                logger.info(f"Updated user {user_id} with subscription info from subscription updated event")
+            if sub_result.data and len(sub_result.data) > 0:
+                user_id = sub_result.data[0].get("user_id")
+                if user_id:
+                    subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z"
+                    
+                    user_update_data = {
+                        "subscription_status": status,
+                        "subscription_expires": subscription_expires
+                    }
+                    
+                    supabase.table("users").update(user_update_data).eq("id", user_id).execute()
+                    logger.info(f"Updated user {user_id} with subscription info from subscription updated event")
             
     except Exception as e:
         logger.error(f"Error handling subscription updated: {e}")
@@ -2903,30 +2904,30 @@ async def handle_subscription_deleted(subscription):
     """Handle subscription cancelled/deleted event"""
     try:
         subscription_id = subscription.get("id")
-        customer_id = subscription.get("customer")
         
         logger.info(f"Subscription deleted: {subscription_id}")
         
         if supabase:
+            # First get user_id from subscriptions table before updating
+            sub_result = supabase.table("subscriptions").select("user_id").eq("stripe_subscription_id", subscription_id).execute()
+            
             supabase.table("subscriptions").update({
                 "status": "cancelled",
                 "cancelled_at": datetime.utcnow().isoformat(),
                 "updated_at": datetime.utcnow().isoformat()
             }).eq("stripe_subscription_id", subscription_id).execute()
             
-            # Update users table - find user by stripe_customer_id
-            user_result = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
-            
-            if user_result.data and len(user_result.data) > 0:
-                user_id = user_result.data[0].get("id")
-                
-                user_update_data = {
-                    "subscription_status": "cancelled",
-                    "subscription_expires": None
-                }
-                
-                supabase.table("users").update(user_update_data).eq("id", user_id).execute()
-                logger.info(f"Updated user {user_id} with cancelled subscription status")
+            # Update users table - find user_id from subscriptions table
+            if sub_result.data and len(sub_result.data) > 0:
+                user_id = sub_result.data[0].get("user_id")
+                if user_id:
+                    user_update_data = {
+                        "subscription_status": "cancelled",
+                        "subscription_expires": None
+                    }
+                    
+                    supabase.table("users").update(user_update_data).eq("id", user_id).execute()
+                    logger.info(f"Updated user {user_id} with cancelled subscription status")
             
     except Exception as e:
         logger.error(f"Error handling subscription deleted: {e}")
@@ -2936,7 +2937,6 @@ async def handle_payment_succeeded(invoice):
     """Handle successful payment"""
     try:
         subscription_id = invoice.get("subscription")
-        customer_id = invoice.get("customer")
         
         if subscription_id:
             logger.info(f"Payment succeeded for subscription: {subscription_id}")
@@ -2948,19 +2948,13 @@ async def handle_payment_succeeded(invoice):
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq("stripe_subscription_id", subscription_id).execute()
                 
-                # Update users table with active status on successful payment
-                if customer_id:
-                    # Get subscription details for new period end date
-                    try:
-                        stripe_subscription = stripe.Subscription.retrieve(subscription_id)
-                        subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z",
-                    except Exception:
-                        subscription_expires = None
-                    
-                    user_result = supabase.table("users").select("id").eq("stripe_customer_id", customer_id).execute()
-                    
-                    if user_result.data and len(user_result.data) > 0:
-                        user_id = user_result.data[0].get("id")
+                # Update users table with active status on successful payment - find user_id from subscriptions table
+                sub_result = supabase.table("subscriptions").select("user_id").eq("stripe_subscription_id", subscription_id).execute()
+                
+                if sub_result.data and len(sub_result.data) > 0:
+                    user_id = sub_result.data[0].get("user_id")
+                    if user_id:
+                        subscription_expires = datetime.utcnow().replace(month=(datetime.utcnow().month + 1) % 12 if datetime.utcnow().month == 12 else datetime.utcnow().month + 1).isoformat() + "Z"
                         
                         user_update_data = {
                             "subscription_status": "active",
