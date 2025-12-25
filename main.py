@@ -2561,6 +2561,224 @@ class CustomerPortalResponse(BaseModel):
     message: Optional[str] = None
 
 
+# ============================================================================
+# PAYMENT INTENT ENDPOINTS (One-time payments)
+# ============================================================================
+
+class CreatePaymentIntentRequest(BaseModel):
+    """Request model for creating a payment intent for one-time purchases"""
+    amount: int  # Amount in cents (e.g., 999 = $9.99)
+    currency: str = "usd"
+    product_id: Optional[str] = None  # e.g., book_id, pdf_id
+    product_type: Optional[str] = None  # e.g., "book", "pdf", "credit_pack"
+    user_email: Optional[str] = None
+    user_id: Optional[str] = None
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, str]] = None
+
+
+class PaymentIntentResponse(BaseModel):
+    """Response model for payment intent creation"""
+    success: bool
+    client_secret: Optional[str] = None
+    payment_intent_id: Optional[str] = None
+    amount: Optional[int] = None
+    currency: Optional[str] = None
+    message: Optional[str] = None
+
+
+class ConfirmPaymentRequest(BaseModel):
+    """Request model for confirming a payment"""
+    payment_intent_id: str
+    user_id: Optional[str] = None
+
+
+class PaymentStatusResponse(BaseModel):
+    """Response model for payment status"""
+    success: bool
+    payment_intent_id: str
+    status: str
+    amount: Optional[int] = None
+    currency: Optional[str] = None
+    message: Optional[str] = None
+
+
+@app.post("/api/payments/create-intent", response_model=PaymentIntentResponse)
+async def create_payment_intent(request: CreatePaymentIntentRequest):
+    """
+    Create a Stripe PaymentIntent for one-time purchases.
+    
+    This is used for:
+    - One-time purchases (books, PDFs, credit packs)
+    - Embedded payment forms using Stripe Elements
+    - More control over the payment flow without redirecting
+    
+    Returns a client_secret for use with Stripe.js on the frontend.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    try:
+        # Validate amount
+        if request.amount < 50:  # Stripe minimum is $0.50
+            raise HTTPException(
+                status_code=400,
+                detail="Amount must be at least 50 cents"
+            )
+        
+        # Build PaymentIntent parameters
+        intent_params = {
+            "amount": request.amount,
+            "currency": request.currency,
+            "payment_method_types": ["card"],
+            "metadata": {
+                "user_id": request.user_id or "",
+                "product_id": request.product_id or "",
+                "product_type": request.product_type or "",
+                "source": "drawtopia_one_time_payment"
+            }
+        }
+        
+        # Add description if provided
+        if request.description:
+            intent_params["description"] = request.description
+        
+        # Add customer email for receipt
+        if request.user_email:
+            intent_params["receipt_email"] = request.user_email
+        
+        # Merge additional metadata if provided
+        if request.metadata:
+            intent_params["metadata"].update(request.metadata)
+        
+        # Create the PaymentIntent
+        payment_intent = stripe.PaymentIntent.create(**intent_params)
+        
+        logger.info(f"Created PaymentIntent {payment_intent.id} for amount {request.amount} {request.currency}")
+        
+        return PaymentIntentResponse(
+            success=True,
+            client_secret=payment_intent.client_secret,
+            payment_intent_id=payment_intent.id,
+            amount=payment_intent.amount,
+            currency=payment_intent.currency
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating payment intent: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating payment intent: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create payment intent: {str(e)}")
+
+
+@app.get("/api/payments/{payment_intent_id}/status", response_model=PaymentStatusResponse)
+async def get_payment_status(payment_intent_id: str):
+    """
+    Get the status of a PaymentIntent.
+    
+    Useful for checking if a payment was successful after the user completes
+    the payment flow on the frontend.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    try:
+        payment_intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+        
+        return PaymentStatusResponse(
+            success=True,
+            payment_intent_id=payment_intent.id,
+            status=payment_intent.status,
+            amount=payment_intent.amount,
+            currency=payment_intent.currency,
+            message=f"Payment is {payment_intent.status}"
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error retrieving payment intent: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error retrieving payment intent: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve payment status: {str(e)}")
+
+
+@app.post("/api/payments/confirm", response_model=PaymentStatusResponse)
+async def confirm_payment(request: ConfirmPaymentRequest):
+    """
+    Confirm a payment was successful and process the purchase.
+    
+    Call this endpoint after the payment is completed on the frontend
+    to record the purchase in the database.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    
+    try:
+        # Retrieve the PaymentIntent to verify status
+        payment_intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
+        
+        if payment_intent.status != "succeeded":
+            return PaymentStatusResponse(
+                success=False,
+                payment_intent_id=payment_intent.id,
+                status=payment_intent.status,
+                message=f"Payment has not succeeded. Current status: {payment_intent.status}"
+            )
+        
+        # Extract metadata
+        metadata = payment_intent.metadata or {}
+        user_id = request.user_id or metadata.get("user_id")
+        product_id = metadata.get("product_id")
+        product_type = metadata.get("product_type")
+        
+        # Record the purchase in the database if we have product info
+        if user_id and product_id and product_type == "book":
+            try:
+                purchase_record = {
+                    "user_id": user_id,
+                    "story_id": int(product_id),
+                    "purchase_status": "completed",
+                    "transaction_id": payment_intent.id,
+                    "amount_paid": payment_intent.amount / 100,  # Convert cents to dollars
+                    "payment_method": "stripe"
+                }
+                supabase.table("book_purchases").insert(purchase_record).execute()
+                logger.info(f"Recorded book purchase for user {user_id}, book {product_id}")
+            except Exception as db_error:
+                logger.error(f"Error recording purchase in database: {db_error}")
+                # Don't fail the response - payment was successful
+        
+        logger.info(f"Payment {payment_intent.id} confirmed successfully")
+        
+        return PaymentStatusResponse(
+            success=True,
+            payment_intent_id=payment_intent.id,
+            status=payment_intent.status,
+            amount=payment_intent.amount,
+            currency=payment_intent.currency,
+            message="Payment confirmed successfully"
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error confirming payment: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error confirming payment: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to confirm payment: {str(e)}")
+
+
+# ============================================================================
+# STRIPE SUBSCRIPTION CHECKOUT
+# ============================================================================
+
 @app.post("/api/stripe/create-subscription-checkout", response_model=SubscriptionResponse)
 async def create_subscription_checkout(request: CreateSubscriptionRequest):
     """
@@ -2671,6 +2889,131 @@ async def get_subscription_status(user_id: str):
     except Exception as e:
         logger.error(f"Error checking subscription status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check subscription status: {str(e)}")
+
+
+@app.get("/api/subscriptions/status")
+async def get_user_subscription_status(
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Get the subscription status for the current authenticated user.
+    Returns the subscription_status field from the users table.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    
+    # Extract user ID from authorization header
+    user_id = extract_user_from_token(authorization)
+    
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to check subscription status"
+        )
+    
+    try:
+        # Query the users table for subscription_status
+        response = supabase.table("users").select("id, subscription_status").eq("id", user_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            user = response.data[0]
+            subscription_status = user.get("subscription_status") or "free"
+            
+            return {
+                "success": True,
+                "user_id": user_id,
+                "subscription_status": subscription_status,
+                "is_premium": subscription_status == "premium"
+            }
+        else:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting subscription status for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get subscription status: {str(e)}")
+
+
+@app.post("/api/subscriptions/cancel")
+async def cancel_subscription(
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Cancel the subscription for the current authenticated user.
+    This will:
+    1. Cancel the subscription in Stripe (stops future billing)
+    2. Update the subscriptions table
+    3. Update the users table subscription_status to 'cancelled'
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    
+    # Extract user ID from authorization header
+    user_id = extract_user_from_token(authorization)
+    
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to cancel subscription"
+        )
+    
+    try:
+        # Get the active subscription for this user
+        subscription_response = supabase.table("subscriptions").select(
+            "stripe_subscription_id, stripe_customer_id, status"
+        ).eq("user_id", user_id).eq("status", "active").execute()
+        
+        if not subscription_response.data or len(subscription_response.data) == 0:
+            raise HTTPException(status_code=404, detail="No active subscription found")
+        
+        subscription_record = subscription_response.data[0]
+        stripe_subscription_id = subscription_record.get("stripe_subscription_id")
+        
+        if not stripe_subscription_id:
+            raise HTTPException(status_code=404, detail="Stripe subscription ID not found")
+        
+        # Cancel the subscription in Stripe
+        cancelled_subscription = stripe.Subscription.cancel(stripe_subscription_id)
+        
+        logger.info(f"Cancelled Stripe subscription {stripe_subscription_id} for user {user_id}")
+        
+        # Update the subscriptions table
+        supabase.table("subscriptions").update({
+            "status": "cancelled",
+            "cancelled_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("user_id", user_id).execute()
+        
+        # Update the users table
+        supabase.table("users").update({
+            "subscription_status": "free plan",
+            "subscription_expires": None
+        }).eq("id", user_id).execute()
+        
+        logger.info(f"Updated user {user_id} subscription status to 'cancelled'")
+        
+        return {
+            "success": True,
+            "message": "Subscription cancelled successfully",
+            "user_id": user_id,
+            "subscription_status": "cancelled"
+        }
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error cancelling subscription: {e}")
+        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling subscription for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cancel subscription: {str(e)}")
+
 
 async def set_user_premium(user_id: str):
     """

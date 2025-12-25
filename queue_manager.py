@@ -120,46 +120,55 @@ class QueueManager:
         """
         last_exception = None
         
+        def _is_retryable_error(error_str: str) -> bool:
+            """Check if the error is a retryable connection/SSL error"""
+            retryable_keywords = [
+                'ssl', 'eof', 'connection', 'unexpected_eof', 
+                'disconnected', 'server disconnected', 'reset',
+                'broken pipe', 'timed out', 'timeout', 'network'
+            ]
+            return any(keyword in error_str for keyword in retryable_keywords)
+        
         for attempt in range(MAX_RETRIES):
             try:
                 return func(*args, **kwargs)
-            except (ssl.SSLError, ConnectionError, OSError) as e:
+            except (ssl.SSLError, ConnectionError, OSError, BrokenPipeError, TimeoutError) as e:
                 last_exception = e
                 error_str = str(e).lower()
                 
-                # Check if it's an SSL-related error
-                if 'ssl' in error_str or 'eof' in error_str or 'connection' in error_str or 'unexpected_eof' in error_str:
+                # Check if it's a retryable error
+                if _is_retryable_error(error_str):
                     if attempt < MAX_RETRIES - 1:
                         delay = min(RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
                         logger.warning(
-                            f"SSL/Connection error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
+                            f"Connection error (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
                             f"Retrying in {delay} seconds..."
                         )
                         time.sleep(delay)
                     else:
-                        logger.error(f"SSL/Connection error after {MAX_RETRIES} attempts: {e}")
+                        logger.error(f"Connection error after {MAX_RETRIES} attempts: {e}")
                         # Re-raise the exception after all retries fail
                         raise
                 else:
-                    # Not an SSL error, re-raise immediately
+                    # Not a retryable error, re-raise immediately
                     raise
             except Exception as e:
-                # Check if it's an SSL-related error in the exception message
+                # Check if it's a retryable error in the exception message
                 error_str = str(e).lower()
-                if 'ssl' in error_str or 'eof' in error_str or 'connection' in error_str or 'unexpected_eof' in error_str:
+                if _is_retryable_error(error_str):
                     last_exception = e
                     if attempt < MAX_RETRIES - 1:
                         delay = min(RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
                         logger.warning(
-                            f"SSL/Connection error in exception (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
+                            f"Connection error in exception (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
                             f"Retrying in {delay} seconds..."
                         )
                         time.sleep(delay)
                     else:
-                        logger.error(f"SSL/Connection error after {MAX_RETRIES} attempts: {e}")
+                        logger.error(f"Connection error after {MAX_RETRIES} attempts: {e}")
                         raise
                 else:
-                    # Not an SSL error, re-raise immediately
+                    # Not a retryable error, re-raise immediately
                     raise
         
         # If we get here, all retries failed (shouldn't happen due to raise above)
