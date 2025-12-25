@@ -2834,8 +2834,8 @@ async def handle_subscription_created(subscription):
                     "stripe_customer_id": customer_id,
                     "stripe_subscription_id": subscription_id,
                     "status": status,
-                    "current_period_start": datetime.fromtimestamp(subscription.get("start", 0)).isoformat(),
-                    "current_period_end": datetime.fromtimestamp(subscription.get("end", 0)).isoformat(),
+                    "current_period_start": datetime.fromtimestamp(subscription.get("created_at", 0)).isoformat(),
+                    "current_period_end": datetime.fromtimestamp(subscription.get("expired_at", 0)).isoformat(),
                     "created_at": datetime.utcnow().isoformat()
                 }
                 supabase.table("subscriptions").insert(subscription_data).execute()
