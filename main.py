@@ -2618,6 +2618,8 @@ async def create_subscription_checkout(request: CreateSubscriptionRequest):
         checkout_session = stripe.checkout.Session.create(**checkout_params)
         
         logger.info(f"Created Stripe checkout session: {checkout_session.id}")
+
+        await set_user_premium(request.user_id)
         
         return SubscriptionResponse(
             success=True,
@@ -2669,6 +2671,37 @@ async def get_subscription_status(user_id: str):
     except Exception as e:
         logger.error(f"Error checking subscription status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check subscription status: {str(e)}")
+
+async def set_user_premium(user_id: str):
+    """
+    Update a user's subscription_status to 'premium'.
+    No input data required - just updates the status to 'premium'.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    
+    try:
+        # Update the subscription_status to "premium"
+        response = supabase.table("users").update({
+            "subscription_status": "premium"
+        }).eq("id", user_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            logger.info(f"Successfully updated user {user_id} subscription_status to 'premium'")
+            return {
+                "success": True,
+                "message": f"User {user_id} subscription status updated to 'premium'",
+                "user_id": user_id,
+                "subscription_status": "premium"
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating subscription status for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update subscription status: {str(e)}")
 
 
 @app.post("/api/stripe/create-customer-portal", response_model=CustomerPortalResponse)
