@@ -1,475 +1,733 @@
 """
-Email Service Module using Resend
+Email Service for Drawtopia
 
-Handles sending transactional emails for:
+This module provides email functionality for:
 - Payment success confirmation
 - Payment failure notification
+- Subscription activation confirmation
 - Subscription cancellation confirmation
 """
 
 import os
-import logging
-from typing import Optional, Dict, Any
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
+from typing import Optional
 from datetime import datetime
+import logging
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Try to import resend
-try:
-    import resend
-    RESEND_AVAILABLE = True
-except ImportError:
-    RESEND_AVAILABLE = False
-    logger.warning("⚠️ resend package not installed. Email functionality will be disabled.")
-
-# Configuration
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "Drawtopia <notifications@drawtopia.com>")
-SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@drawtopia.com")
+# Email Configuration
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "")
+FROM_NAME = os.getenv("FROM_NAME", "Drawtopia")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
-# Initialize Resend
-if RESEND_AVAILABLE and RESEND_API_KEY:
-    resend.api_key = RESEND_API_KEY
-    logger.info("✅ Resend email service initialized successfully")
+# Check if email service is available
+EMAIL_SERVICE_AVAILABLE = bool(SMTP_USER and SMTP_PASSWORD and FROM_EMAIL)
+
+if EMAIL_SERVICE_AVAILABLE:
+    logger.info("✅ Email service initialized successfully")
 else:
-    if not RESEND_API_KEY:
-        logger.warning("⚠️ RESEND_API_KEY not found. Email functionality will be disabled.")
+    logger.warning("⚠️ Email service not configured. Email notifications will be disabled.")
 
 
-class EmailService:
-    """Email service for sending transactional emails via Resend"""
-    
-    @staticmethod
-    def is_available() -> bool:
-        """Check if email service is available"""
-        return RESEND_AVAILABLE and bool(RESEND_API_KEY)
-    
-    @staticmethod
-    def _format_amount(amount_cents: int, currency: str = "usd") -> str:
-        """Format amount from cents to display string"""
-        amount = amount_cents / 100
-        currency_symbols = {
-            "usd": "$",
-            "eur": "€",
-            "gbp": "£",
-            "jpy": "¥",
-        }
-        symbol = currency_symbols.get(currency.lower(), "$")
-        return f"{symbol}{amount:.2f}"
-    
-    @staticmethod
-    def _format_date(date_str: Optional[str] = None) -> str:
-        """Format date for display"""
-        if date_str:
-            try:
-                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                return dt.strftime("%B %d, %Y")
-            except:
-                pass
-        return datetime.utcnow().strftime("%B %d, %Y")
-    
-    @staticmethod
-    async def send_payment_success_email(
-        to_email: str,
-        customer_name: Optional[str] = None,
-        amount: int = 0,
-        currency: str = "usd",
-        plan_type: str = "monthly",
-        subscription_id: Optional[str] = None,
-        invoice_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Send payment success confirmation email
-        
-        Args:
-            to_email: Recipient email address
-            customer_name: Customer's name (optional)
-            amount: Amount paid in cents
-            currency: Currency code (default: usd)
-            plan_type: Subscription plan type (monthly/yearly)
-            subscription_id: Stripe subscription ID
-            invoice_id: Stripe invoice ID
-        
-        Returns:
-            Dict with success status and message/error
-        """
-        if not EmailService.is_available():
-            logger.warning("Email service not available, skipping payment success email")
-            return {"success": False, "error": "Email service not configured"}
-        
-        try:
-            formatted_amount = EmailService._format_amount(amount, currency)
-            formatted_date = EmailService._format_date()
-            greeting = f"Hi {customer_name}," if customer_name else "Hi there,"
-            
-            # Create beautiful HTML email
-            html_content = f"""
+def _get_base_html_template() -> str:
+    """Base HTML template with styling"""
+    return """
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }}
+        .header {{
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            padding: 32px 24px;
+            text-align: center;
+        }}
+        .header h1 {{
+            margin: 0;
+            color: #ffffff;
+            font-size: 28px;
+            font-weight: 700;
+        }}
+        .header .logo {{
+            font-size: 40px;
+            margin-bottom: 12px;
+        }}
+        .content {{
+            padding: 32px 24px;
+        }}
+        .greeting {{
+            font-size: 18px;
+            color: #1f2937;
+            margin-bottom: 20px;
+        }}
+        .message {{
+            color: #4b5563;
+            margin-bottom: 24px;
+        }}
+        .details-box {{
+            background-color: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }}
+        .details-box h3 {{
+            margin: 0 0 16px 0;
+            color: #374151;
+            font-size: 16px;
+        }}
+        .detail-row {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }}
+        .detail-row:last-child {{
+            border-bottom: none;
+        }}
+        .detail-label {{
+            color: #6b7280;
+        }}
+        .detail-value {{
+            color: #1f2937;
+            font-weight: 500;
+        }}
+        .status-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }}
+        .status-success {{
+            background-color: #dcfce7;
+            color: #166534;
+        }}
+        .status-failed {{
+            background-color: #fee2e2;
+            color: #991b1b;
+        }}
+        .status-cancelled {{
+            background-color: #fef3c7;
+            color: #92400e;
+        }}
+        .button {{
+            display: inline-block;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            margin-top: 16px;
+        }}
+        .button:hover {{
+            opacity: 0.9;
+        }}
+        .button-secondary {{
+            background: #6b7280;
+        }}
+        .footer {{
+            background-color: #f9fafb;
+            padding: 24px;
+            text-align: center;
+            border-top: 1px solid #e5e7eb;
+        }}
+        .footer p {{
+            margin: 0;
+            color: #6b7280;
+            font-size: 14px;
+        }}
+        .footer a {{
+            color: #6366f1;
+            text-decoration: none;
+        }}
+        .alert-box {{
+            background-color: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }}
+        .alert-box.warning {{
+            background-color: #fffbeb;
+            border-color: #fde68a;
+        }}
+        .alert-box p {{
+            margin: 0;
+            color: #991b1b;
+        }}
+        .alert-box.warning p {{
+            color: #92400e;
+        }}
+    </style>
 </head>
-<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc;">
-    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-        <!-- Header -->
-        <div style="text-align: center; margin-bottom: 32px;">
-            <h1 style="color: #10b981; font-size: 28px; margin: 0;">✨ Payment Successful!</h1>
-        </div>
-        
-        <!-- Main Card -->
-        <div style="background-color: #ffffff; border-radius: 16px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-            <p style="color: #374151; font-size: 16px; line-height: 1.6; margin-top: 0;">
-                {greeting}
-            </p>
-            
-            <p style="color: #374151; font-size: 16px; line-height: 1.6;">
-                Thank you for subscribing to Drawtopia! Your payment has been processed successfully.
-            </p>
-            
-            <!-- Payment Details -->
-            <div style="background-color: #f0fdf4; border-radius: 12px; padding: 24px; margin: 24px 0;">
-                <h3 style="color: #166534; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0;">
-                    Payment Details
-                </h3>
-                <table style="width: 100%; border-collapse: collapse;">
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Plan</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            Premium ({plan_type.capitalize()})
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Amount</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {formatted_amount}
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Date</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {formatted_date}
-                        </td>
-                    </tr>
-                    {f'''<tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Invoice ID</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {invoice_id[:20]}...
-                        </td>
-                    </tr>''' if invoice_id else ''}
-                </table>
-            </div>
-            
-            <p style="color: #374151; font-size: 16px; line-height: 1.6;">
-                You now have access to all premium features including unlimited story generation, 
-                advanced AI art styles, and priority support!
-            </p>
-            
-            <!-- CTA Button -->
-            <div style="text-align: center; margin: 32px 0;">
-                <a href="{FRONTEND_URL}/dashboard" 
-                   style="display: inline-block; background-color: #10b981; color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 14px 32px; border-radius: 8px;">
-                    Go to Dashboard →
-                </a>
-            </div>
-        </div>
-        
-        <!-- Footer -->
-        <div style="text-align: center; margin-top: 32px; color: #9ca3af; font-size: 14px;">
-            <p style="margin: 0 0 8px 0;">Need help? Contact us at <a href="mailto:{SUPPORT_EMAIL}" style="color: #10b981;">{SUPPORT_EMAIL}</a></p>
-            <p style="margin: 0;">© {datetime.utcnow().year} Drawtopia. All rights reserved.</p>
-        </div>
+<body>
+    <div class="container">
+        {content}
     </div>
 </body>
 </html>
 """
-            
-            # Send email via Resend
-            response = resend.Emails.send({
-                "from": FROM_EMAIL,
-                "to": [to_email],
-                "subject": "✨ Payment Successful - Welcome to Drawtopia Premium!",
-                "html": html_content
-            })
-            
-            logger.info(f"Payment success email sent to {to_email}")
-            return {"success": True, "message": "Payment success email sent", "id": response.get("id")}
-            
-        except Exception as e:
-            logger.error(f"Failed to send payment success email to {to_email}: {e}")
-            return {"success": False, "error": str(e)}
+
+
+def _send_email(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    plain_text: Optional[str] = None
+) -> bool:
+    """
+    Send an email using SMTP.
     
-    @staticmethod
-    async def send_payment_failed_email(
-        to_email: str,
-        customer_name: Optional[str] = None,
-        amount: int = 0,
-        currency: str = "usd",
-        failure_reason: Optional[str] = None,
-        next_retry_date: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Send payment failure notification email
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        html_content: HTML content of the email
+        plain_text: Optional plain text version
+    
+    Returns:
+        True if email sent successfully, False otherwise
+    """
+    if not EMAIL_SERVICE_AVAILABLE:
+        logger.warning(f"Email service not available. Skipping email to {to_email}")
+        return False
+    
+    try:
+        # Create message
+        message = MIMEMultipart("alternative")
+        message["Subject"] = subject
+        message["From"] = formataddr((FROM_NAME, FROM_EMAIL))
+        message["To"] = to_email
         
-        Args:
-            to_email: Recipient email address
-            customer_name: Customer's name (optional)
-            amount: Amount that failed in cents
-            currency: Currency code
-            failure_reason: Reason for payment failure
-            next_retry_date: Date of next retry attempt
+        # Add plain text version
+        if plain_text:
+            part1 = MIMEText(plain_text, "plain")
+            message.attach(part1)
         
-        Returns:
-            Dict with success status and message/error
-        """
-        if not EmailService.is_available():
-            logger.warning("Email service not available, skipping payment failed email")
-            return {"success": False, "error": "Email service not configured"}
+        # Add HTML version
+        part2 = MIMEText(html_content, "html")
+        message.attach(part2)
         
-        try:
-            formatted_amount = EmailService._format_amount(amount, currency)
-            formatted_date = EmailService._format_date()
-            greeting = f"Hi {customer_name}," if customer_name else "Hi there,"
-            
-            failure_message = failure_reason or "Your card was declined or there were insufficient funds."
-            
-            # Create HTML email for payment failure
-            html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc;">
-    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-        <!-- Header -->
-        <div style="text-align: center; margin-bottom: 32px;">
-            <h1 style="color: #ef4444; font-size: 28px; margin: 0;">⚠️ Payment Failed</h1>
+        # Create secure connection and send
+        context = ssl.create_default_context()
+        
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls(context=context)
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(FROM_EMAIL, to_email, message.as_string())
+        
+        logger.info(f"✅ Email sent successfully to {to_email}: {subject}")
+        return True
+        
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"SMTP authentication error: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error sending email: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error sending email to {to_email}: {e}")
+        return False
+
+
+async def send_payment_success_email(
+    to_email: str,
+    customer_name: Optional[str] = None,
+    amount: float = 0,
+    currency: str = "USD",
+    plan_type: str = "monthly",
+    transaction_id: Optional[str] = None,
+    subscription_end_date: Optional[str] = None
+) -> bool:
+    """
+    Send payment success confirmation email.
+    
+    Args:
+        to_email: Customer email address
+        customer_name: Customer name (optional)
+        amount: Payment amount
+        currency: Currency code
+        plan_type: Subscription plan type (monthly/yearly)
+        transaction_id: Stripe transaction ID
+        subscription_end_date: When the subscription period ends
+    
+    Returns:
+        True if email sent successfully
+    """
+    name = customer_name or "Valued Customer"
+    formatted_amount = f"${amount:.2f}" if currency.upper() == "USD" else f"{amount:.2f} {currency.upper()}"
+    plan_display = "Monthly" if plan_type == "monthly" else "Yearly"
+    
+    content = f"""
+        <div class="header">
+            <div class="logo">✨</div>
+            <h1>Payment Successful!</h1>
         </div>
-        
-        <!-- Main Card -->
-        <div style="background-color: #ffffff; border-radius: 16px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-            <p style="color: #374151; font-size: 16px; line-height: 1.6; margin-top: 0;">
-                {greeting}
+        <div class="content">
+            <p class="greeting">Hi {name},</p>
+            <p class="message">
+                Great news! Your payment has been processed successfully. Your Drawtopia subscription is now active!
             </p>
             
-            <p style="color: #374151; font-size: 16px; line-height: 1.6;">
-                We were unable to process your payment for your Drawtopia subscription. 
-                Don't worry - your access is still active while we retry.
-            </p>
-            
-            <!-- Payment Details -->
-            <div style="background-color: #fef2f2; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #ef4444;">
-                <h3 style="color: #991b1b; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0;">
-                    Payment Details
-                </h3>
-                <table style="width: 100%; border-collapse: collapse;">
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Amount</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {formatted_amount}
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Date</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {formatted_date}
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Reason</td>
-                        <td style="color: #ef4444; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {failure_message}
-                        </td>
-                    </tr>
-                </table>
+            <div class="details-box">
+                <h3>Payment Details</h3>
+                <div class="detail-row">
+                    <span class="detail-label">Status</span>
+                    <span class="detail-value"><span class="status-badge status-success">Successful</span></span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Amount</span>
+                    <span class="detail-value">{formatted_amount}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Plan</span>
+                    <span class="detail-value">{plan_display} Subscription</span>
+                </div>
+                {"<div class='detail-row'><span class='detail-label'>Transaction ID</span><span class='detail-value'>" + transaction_id + "</span></div>" if transaction_id else ""}
+                {"<div class='detail-row'><span class='detail-label'>Next Billing Date</span><span class='detail-value'>" + subscription_end_date + "</span></div>" if subscription_end_date else ""}
             </div>
             
-            <p style="color: #374151; font-size: 16px; line-height: 1.6;">
-                <strong>What you can do:</strong>
+            <p class="message">
+                You now have full access to all premium features. Start creating amazing illustrated stories for your children!
             </p>
-            <ul style="color: #374151; font-size: 16px; line-height: 1.8; padding-left: 20px;">
-                <li>Update your payment method in your account settings</li>
+            
+            <center>
+                <a href="{FRONTEND_URL}/account" class="button">Go to Dashboard</a>
+            </center>
+        </div>
+        <div class="footer">
+            <p>Thank you for choosing Drawtopia! 📚✨</p>
+            <p style="margin-top: 12px;">
+                <a href="{FRONTEND_URL}">Visit Drawtopia</a> | 
+                <a href="{FRONTEND_URL}/account">Manage Account</a>
+            </p>
+        </div>
+    """
+    
+    html = _get_base_html_template().format(title="Payment Successful - Drawtopia", content=content)
+    
+    plain_text = f"""
+Hi {name},
+
+Great news! Your payment has been processed successfully.
+
+Payment Details:
+- Status: Successful
+- Amount: {formatted_amount}
+- Plan: {plan_display} Subscription
+{f"- Transaction ID: {transaction_id}" if transaction_id else ""}
+{f"- Next Billing Date: {subscription_end_date}" if subscription_end_date else ""}
+
+You now have full access to all premium features. Start creating amazing illustrated stories for your children!
+
+Visit your dashboard: {FRONTEND_URL}/account
+
+Thank you for choosing Drawtopia!
+"""
+    
+    return _send_email(to_email, "🎉 Payment Successful - Your Drawtopia Subscription is Active!", html, plain_text)
+
+
+async def send_payment_failed_email(
+    to_email: str,
+    customer_name: Optional[str] = None,
+    amount: float = 0,
+    currency: str = "USD",
+    plan_type: str = "monthly",
+    failure_reason: Optional[str] = None,
+    retry_url: Optional[str] = None
+) -> bool:
+    """
+    Send payment failure notification email.
+    
+    Args:
+        to_email: Customer email address
+        customer_name: Customer name (optional)
+        amount: Payment amount attempted
+        currency: Currency code
+        plan_type: Subscription plan type
+        failure_reason: Reason for payment failure
+        retry_url: URL to retry payment
+    
+    Returns:
+        True if email sent successfully
+    """
+    name = customer_name or "Valued Customer"
+    formatted_amount = f"${amount:.2f}" if currency.upper() == "USD" else f"{amount:.2f} {currency.upper()}"
+    plan_display = "Monthly" if plan_type == "monthly" else "Yearly"
+    update_payment_url = retry_url or f"{FRONTEND_URL}/account"
+    
+    failure_message = failure_reason or "Your payment could not be processed"
+    
+    content = f"""
+        <div class="header" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);">
+            <div class="logo">⚠️</div>
+            <h1>Payment Failed</h1>
+        </div>
+        <div class="content">
+            <p class="greeting">Hi {name},</p>
+            
+            <div class="alert-box">
+                <p><strong>Payment Issue:</strong> {failure_message}</p>
+            </div>
+            
+            <p class="message">
+                We were unable to process your payment for your Drawtopia subscription. 
+                Please update your payment method to continue enjoying premium features.
+            </p>
+            
+            <div class="details-box">
+                <h3>Payment Attempt Details</h3>
+                <div class="detail-row">
+                    <span class="detail-label">Status</span>
+                    <span class="detail-value"><span class="status-badge status-failed">Failed</span></span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Amount</span>
+                    <span class="detail-value">{formatted_amount}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Plan</span>
+                    <span class="detail-value">{plan_display} Subscription</span>
+                </div>
+            </div>
+            
+            <p class="message">
+                <strong>What to do next:</strong>
+            </p>
+            <ul style="color: #4b5563;">
+                <li>Check that your card details are correct</li>
                 <li>Ensure your card has sufficient funds</li>
-                <li>Check if your card is not expired</li>
                 <li>Contact your bank if the issue persists</li>
             </ul>
             
-            {f'''<p style="color: #6b7280; font-size: 14px; line-height: 1.6;">
-                We will automatically retry the payment on <strong>{next_retry_date}</strong>.
-            </p>''' if next_retry_date else ''}
-            
-            <!-- CTA Button -->
-            <div style="text-align: center; margin: 32px 0;">
-                <a href="{FRONTEND_URL}/account" 
-                   style="display: inline-block; background-color: #ef4444; color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 14px 32px; border-radius: 8px;">
-                    Update Payment Method →
-                </a>
-            </div>
+            <center>
+                <a href="{update_payment_url}" class="button">Update Payment Method</a>
+            </center>
         </div>
-        
-        <!-- Footer -->
-        <div style="text-align: center; margin-top: 32px; color: #9ca3af; font-size: 14px;">
-            <p style="margin: 0 0 8px 0;">Need help? Contact us at <a href="mailto:{SUPPORT_EMAIL}" style="color: #ef4444;">{SUPPORT_EMAIL}</a></p>
-            <p style="margin: 0;">© {datetime.utcnow().year} Drawtopia. All rights reserved.</p>
+        <div class="footer">
+            <p>Need help? Reply to this email or visit our support page.</p>
+            <p style="margin-top: 12px;">
+                <a href="{FRONTEND_URL}">Visit Drawtopia</a> | 
+                <a href="{FRONTEND_URL}/account">Manage Account</a>
+            </p>
         </div>
-    </div>
-</body>
-</html>
-"""
-            
-            # Send email via Resend
-            response = resend.Emails.send({
-                "from": FROM_EMAIL,
-                "to": [to_email],
-                "subject": "⚠️ Action Required: Payment Failed for Your Drawtopia Subscription",
-                "html": html_content
-            })
-            
-            logger.info(f"Payment failed email sent to {to_email}")
-            return {"success": True, "message": "Payment failed email sent", "id": response.get("id")}
-            
-        except Exception as e:
-            logger.error(f"Failed to send payment failed email to {to_email}: {e}")
-            return {"success": False, "error": str(e)}
+    """
     
-    @staticmethod
-    async def send_subscription_cancelled_email(
-        to_email: str,
-        customer_name: Optional[str] = None,
-        plan_type: str = "monthly",
-        end_date: Optional[str] = None,
-        reason: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Send subscription cancellation confirmation email
-        
-        Args:
-            to_email: Recipient email address
-            customer_name: Customer's name (optional)
-            plan_type: The plan that was cancelled
-            end_date: When the subscription access ends
-            reason: Cancellation reason (optional)
-        
-        Returns:
-            Dict with success status and message/error
-        """
-        if not EmailService.is_available():
-            logger.warning("Email service not available, skipping cancellation email")
-            return {"success": False, "error": "Email service not configured"}
-        
-        try:
-            formatted_end_date = EmailService._format_date(end_date) if end_date else "immediately"
-            greeting = f"Hi {customer_name}," if customer_name else "Hi there,"
-            
-            # Create HTML email for cancellation
-            html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc;">
-    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-        <!-- Header -->
-        <div style="text-align: center; margin-bottom: 32px;">
-            <h1 style="color: #6366f1; font-size: 28px; margin: 0;">Subscription Cancelled</h1>
+    html = _get_base_html_template().format(title="Payment Failed - Drawtopia", content=content)
+    
+    plain_text = f"""
+Hi {name},
+
+We were unable to process your payment for your Drawtopia subscription.
+
+Payment Issue: {failure_message}
+
+Payment Attempt Details:
+- Status: Failed
+- Amount: {formatted_amount}
+- Plan: {plan_display} Subscription
+
+What to do next:
+- Check that your card details are correct
+- Ensure your card has sufficient funds
+- Contact your bank if the issue persists
+
+Update your payment method: {update_payment_url}
+
+Need help? Reply to this email or visit our support page.
+"""
+    
+    return _send_email(to_email, "⚠️ Payment Failed - Action Required for Your Drawtopia Subscription", html, plain_text)
+
+
+async def send_subscription_activation_email(
+    to_email: str,
+    customer_name: Optional[str] = None,
+    plan_type: str = "monthly",
+    subscription_start_date: Optional[str] = None,
+    subscription_end_date: Optional[str] = None
+) -> bool:
+    """
+    Send subscription activation confirmation email.
+    
+    Args:
+        to_email: Customer email address
+        customer_name: Customer name (optional)
+        plan_type: Subscription plan type
+        subscription_start_date: When subscription started
+        subscription_end_date: When subscription period ends
+    
+    Returns:
+        True if email sent successfully
+    """
+    name = customer_name or "Valued Customer"
+    plan_display = "Monthly" if plan_type == "monthly" else "Yearly"
+    start_date = subscription_start_date or datetime.utcnow().strftime("%B %d, %Y")
+    
+    content = f"""
+        <div class="header">
+            <div class="logo">🎉</div>
+            <h1>Welcome to Drawtopia Premium!</h1>
         </div>
-        
-        <!-- Main Card -->
-        <div style="background-color: #ffffff; border-radius: 16px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-            <p style="color: #374151; font-size: 16px; line-height: 1.6; margin-top: 0;">
-                {greeting}
+        <div class="content">
+            <p class="greeting">Hi {name},</p>
+            <p class="message">
+                Your subscription has been activated successfully! You now have access to all premium features.
             </p>
             
-            <p style="color: #374151; font-size: 16px; line-height: 1.6;">
-                Your Drawtopia Premium subscription has been cancelled as requested. 
-                We're sorry to see you go!
-            </p>
-            
-            <!-- Cancellation Details -->
-            <div style="background-color: #eef2ff; border-radius: 12px; padding: 24px; margin: 24px 0;">
-                <h3 style="color: #3730a3; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0;">
-                    Cancellation Details
-                </h3>
-                <table style="width: 100%; border-collapse: collapse;">
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Plan Cancelled</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            Premium ({plan_type.capitalize()})
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Status</td>
-                        <td style="color: #ef4444; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            Cancelled
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="color: #6b7280; font-size: 14px; padding: 8px 0;">Access Until</td>
-                        <td style="color: #111827; font-size: 14px; padding: 8px 0; text-align: right; font-weight: 600;">
-                            {formatted_end_date}
-                        </td>
-                    </tr>
-                </table>
+            <div class="details-box">
+                <h3>Subscription Details</h3>
+                <div class="detail-row">
+                    <span class="detail-label">Status</span>
+                    <span class="detail-value"><span class="status-badge status-success">Active</span></span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Plan</span>
+                    <span class="detail-value">{plan_display} Subscription</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Started On</span>
+                    <span class="detail-value">{start_date}</span>
+                </div>
+                {"<div class='detail-row'><span class='detail-label'>Next Billing</span><span class='detail-value'>" + subscription_end_date + "</span></div>" if subscription_end_date else ""}
             </div>
             
-            <p style="color: #374151; font-size: 16px; line-height: 1.6;">
-                <strong>What happens next:</strong>
-            </p>
-            <ul style="color: #374151; font-size: 16px; line-height: 1.8; padding-left: 20px;">
-                <li>You'll retain access to premium features until {formatted_end_date}</li>
-                <li>After that, your account will switch to the free plan</li>
-                <li>Your stories and creations will always be saved</li>
-                <li>You can resubscribe anytime to regain premium access</li>
+            <p class="message"><strong>What you can do now:</strong></p>
+            <ul style="color: #4b5563;">
+                <li>Create unlimited illustrated stories</li>
+                <li>Access all premium characters and themes</li>
+                <li>Download high-quality PDFs</li>
+                <li>Generate audio narration for your stories</li>
             </ul>
             
-            <!-- Feedback Section -->
-            <div style="background-color: #fefce8; border-radius: 12px; padding: 20px; margin: 24px 0; text-align: center;">
-                <p style="color: #713f12; font-size: 14px; margin: 0;">
-                    💡 We'd love to hear your feedback! Reply to this email and let us know how we can improve.
-                </p>
-            </div>
-            
-            <!-- CTA Button -->
-            <div style="text-align: center; margin: 32px 0;">
-                <p style="color: #6b7280; font-size: 14px; margin-bottom: 16px;">Changed your mind?</p>
-                <a href="{FRONTEND_URL}/pricing" 
-                   style="display: inline-block; background-color: #6366f1; color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 14px 32px; border-radius: 8px;">
-                    Resubscribe →
-                </a>
-            </div>
+            <center>
+                <a href="{FRONTEND_URL}/create" class="button">Create Your First Story</a>
+            </center>
         </div>
-        
-        <!-- Footer -->
-        <div style="text-align: center; margin-top: 32px; color: #9ca3af; font-size: 14px;">
-            <p style="margin: 0 0 8px 0;">Questions? Contact us at <a href="mailto:{SUPPORT_EMAIL}" style="color: #6366f1;">{SUPPORT_EMAIL}</a></p>
-            <p style="margin: 0;">© {datetime.utcnow().year} Drawtopia. All rights reserved.</p>
+        <div class="footer">
+            <p>Thank you for joining Drawtopia Premium! 📚✨</p>
+            <p style="margin-top: 12px;">
+                <a href="{FRONTEND_URL}">Visit Drawtopia</a> | 
+                <a href="{FRONTEND_URL}/account">Manage Subscription</a>
+            </p>
         </div>
-    </div>
-</body>
-</html>
+    """
+    
+    html = _get_base_html_template().format(title="Subscription Activated - Drawtopia", content=content)
+    
+    plain_text = f"""
+Hi {name},
+
+Your subscription has been activated successfully!
+
+Subscription Details:
+- Status: Active
+- Plan: {plan_display} Subscription
+- Started On: {start_date}
+{f"- Next Billing: {subscription_end_date}" if subscription_end_date else ""}
+
+What you can do now:
+- Create unlimited illustrated stories
+- Access all premium characters and themes
+- Download high-quality PDFs
+- Generate audio narration for your stories
+
+Start creating: {FRONTEND_URL}/create
+
+Thank you for joining Drawtopia Premium!
 """
-            
-            # Send email via Resend
-            response = resend.Emails.send({
-                "from": FROM_EMAIL,
-                "to": [to_email],
-                "subject": "Your Drawtopia Premium Subscription Has Been Cancelled",
-                "html": html_content
-            })
-            
-            logger.info(f"Subscription cancelled email sent to {to_email}")
-            return {"success": True, "message": "Cancellation email sent", "id": response.get("id")}
-            
-        except Exception as e:
-            logger.error(f"Failed to send cancellation email to {to_email}: {e}")
-            return {"success": False, "error": str(e)}
+    
+    return _send_email(to_email, "🎉 Welcome to Drawtopia Premium - Your Subscription is Active!", html, plain_text)
 
 
-# Create a singleton instance for easy access
-email_service = EmailService()
+async def send_subscription_cancellation_email(
+    to_email: str,
+    customer_name: Optional[str] = None,
+    plan_type: str = "monthly",
+    cancellation_date: Optional[str] = None,
+    access_end_date: Optional[str] = None,
+    reason: Optional[str] = None
+) -> bool:
+    """
+    Send subscription cancellation confirmation email.
+    
+    Args:
+        to_email: Customer email address
+        customer_name: Customer name (optional)
+        plan_type: Subscription plan type that was cancelled
+        cancellation_date: When the cancellation was processed
+        access_end_date: When access will end (end of billing period)
+        reason: Optional cancellation reason
+    
+    Returns:
+        True if email sent successfully
+    """
+    name = customer_name or "Valued Customer"
+    plan_display = "Monthly" if plan_type == "monthly" else "Yearly"
+    cancel_date = cancellation_date or datetime.utcnow().strftime("%B %d, %Y")
+    
+    content = f"""
+        <div class="header" style="background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);">
+            <div class="logo">📭</div>
+            <h1>Subscription Cancelled</h1>
+        </div>
+        <div class="content">
+            <p class="greeting">Hi {name},</p>
+            <p class="message">
+                We're sorry to see you go. Your Drawtopia subscription has been cancelled as requested.
+            </p>
+            
+            <div class="details-box">
+                <h3>Cancellation Details</h3>
+                <div class="detail-row">
+                    <span class="detail-label">Status</span>
+                    <span class="detail-value"><span class="status-badge status-cancelled">Cancelled</span></span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Plan</span>
+                    <span class="detail-value">{plan_display} Subscription</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Cancelled On</span>
+                    <span class="detail-value">{cancel_date}</span>
+                </div>
+                {"<div class='detail-row'><span class='detail-label'>Access Until</span><span class='detail-value'>" + access_end_date + "</span></div>" if access_end_date else ""}
+            </div>
+            
+            <div class="alert-box warning">
+                <p>{"<strong>Note:</strong> You can still access premium features until " + access_end_date + "." if access_end_date else "<strong>Note:</strong> Your premium access has ended."}</p>
+            </div>
+            
+            <p class="message">
+                We'd love to have you back! If you change your mind, you can resubscribe anytime.
+            </p>
+            
+            <center>
+                <a href="{FRONTEND_URL}/pricing" class="button">Resubscribe</a>
+                <a href="{FRONTEND_URL}/account" class="button button-secondary" style="margin-left: 12px;">View Account</a>
+            </center>
+        </div>
+        <div class="footer">
+            <p>Thank you for being a Drawtopia member. We hope to see you again soon! 👋</p>
+            <p style="margin-top: 12px;">
+                <a href="{FRONTEND_URL}">Visit Drawtopia</a>
+            </p>
+        </div>
+    """
+    
+    html = _get_base_html_template().format(title="Subscription Cancelled - Drawtopia", content=content)
+    
+    plain_text = f"""
+Hi {name},
+
+We're sorry to see you go. Your Drawtopia subscription has been cancelled as requested.
+
+Cancellation Details:
+- Status: Cancelled
+- Plan: {plan_display} Subscription
+- Cancelled On: {cancel_date}
+{f"- Access Until: {access_end_date}" if access_end_date else ""}
+
+{"You can still access premium features until " + access_end_date + "." if access_end_date else "Your premium access has ended."}
+
+We'd love to have you back! If you change your mind, you can resubscribe anytime at: {FRONTEND_URL}/pricing
+
+Thank you for being a Drawtopia member. We hope to see you again soon!
+"""
+    
+    return _send_email(to_email, "📭 Your Drawtopia Subscription Has Been Cancelled", html, plain_text)
+
+
+# Utility function to get customer email from Stripe customer ID
+async def get_customer_email_from_stripe(customer_id: str) -> Optional[str]:
+    """
+    Get customer email from Stripe using customer ID.
+    
+    Args:
+        customer_id: Stripe customer ID
+    
+    Returns:
+        Customer email or None
+    """
+    try:
+        import stripe
+        customer = stripe.Customer.retrieve(customer_id)
+        return customer.get("email")
+    except Exception as e:
+        logger.error(f"Error retrieving customer email from Stripe: {e}")
+        return None
+
+
+# Utility function to get customer info from database
+async def get_customer_info_from_db(supabase_client, customer_id: str = None, user_id: str = None):
+    """
+    Get customer info from database.
+    
+    Args:
+        supabase_client: Supabase client instance
+        customer_id: Stripe customer ID
+        user_id: User ID
+    
+    Returns:
+        Dict with customer info (email, name) or None
+    """
+    try:
+        if not supabase_client:
+            return None
+        
+        query = supabase_client.table("users").select("email, full_name, username")
+        
+        if user_id:
+            query = query.eq("id", user_id)
+        elif customer_id:
+            query = query.eq("stripe_customer_id", customer_id)
+        else:
+            return None
+        
+        result = query.execute()
+        
+        if result.data and len(result.data) > 0:
+            user = result.data[0]
+            return {
+                "email": user.get("email"),
+                "name": user.get("full_name") or user.get("username")
+            }
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error retrieving customer info from database: {e}")
+        return None
 
