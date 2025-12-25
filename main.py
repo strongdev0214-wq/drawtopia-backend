@@ -2936,17 +2936,22 @@ async def get_user_subscription_status(
         raise HTTPException(status_code=500, detail=f"Failed to get subscription status: {str(e)}")
 
 
+class CancelSubscriptionRequest(BaseModel):
+    stripe_subscription_id: str
+
+
 @app.post("/api/subscriptions/cancel")
 async def cancel_subscription(
     request: Request,
+    body: CancelSubscriptionRequest,
     authorization: Optional[str] = Header(None)
 ):
     """
     Cancel the subscription for the current authenticated user.
     This will:
-    1. Cancel the subscription in Stripe (stops future billing)
+    1. Cancel the subscription in Stripe using the provided stripe_subscription_id
     2. Update the subscriptions table
-    3. Update the users table subscription_status to 'cancelled'
+    3. Update the users table subscription_status to 'free plan'
     """
     if not STRIPE_SECRET_KEY:
         raise HTTPException(status_code=503, detail="Stripe is not configured")
@@ -2963,20 +2968,25 @@ async def cancel_subscription(
             detail="Authentication required to cancel subscription"
         )
     
+    stripe_subscription_id = body.stripe_subscription_id
+    
+    if not stripe_subscription_id:
+        raise HTTPException(status_code=400, detail="stripe_subscription_id is required")
+    
     try:
-        # Get the active subscription for this user
+        # Verify the subscription belongs to this user
         subscription_response = supabase.table("subscriptions").select(
-            "stripe_subscription_id, stripe_customer_id, status"
-        ).eq("user_id", user_id).eq("status", "active").execute()
+            "stripe_subscription_id, stripe_customer_id, status, user_id"
+        ).eq("stripe_subscription_id", stripe_subscription_id).execute()
         
         if not subscription_response.data or len(subscription_response.data) == 0:
-            raise HTTPException(status_code=404, detail="No active subscription found")
+            raise HTTPException(status_code=404, detail="Subscription not found")
         
         subscription_record = subscription_response.data[0]
-        stripe_subscription_id = subscription_record.get("stripe_subscription_id")
         
-        if not stripe_subscription_id:
-            raise HTTPException(status_code=404, detail="Stripe subscription ID not found")
+        # Verify the subscription belongs to the authenticated user
+        if subscription_record.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="You can only cancel your own subscription")
         
         # Cancel the subscription in Stripe
         cancelled_subscription = stripe.Subscription.cancel(stripe_subscription_id)
@@ -2988,7 +2998,7 @@ async def cancel_subscription(
             "status": "cancelled",
             "cancelled_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat()
-        }).eq("user_id", user_id).execute()
+        }).eq("stripe_subscription_id", stripe_subscription_id).execute()
         
         # Update the users table
         supabase.table("users").update({
@@ -2996,22 +3006,23 @@ async def cancel_subscription(
             "subscription_expires": None
         }).eq("id", user_id).execute()
         
-        logger.info(f"Updated user {user_id} subscription status to 'cancelled'")
+        logger.info(f"Updated user {user_id} subscription status to 'free plan'")
         
         return {
             "success": True,
             "message": "Subscription cancelled successfully",
             "user_id": user_id,
+            "stripe_subscription_id": stripe_subscription_id,
             "subscription_status": "cancelled"
         }
         
     except stripe.error.StripeError as e:
-        logger.error(f"Stripe error cancelling subscription: {e}")
+        logger.error(f"Stripe error cancelling subscription {stripe_subscription_id}: {e}")
         raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error cancelling subscription for user {user_id}: {e}")
+        logger.error(f"Error cancelling subscription {stripe_subscription_id} for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cancel subscription: {str(e)}")
 
 
