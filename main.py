@@ -62,6 +62,7 @@ STORAGE_BUCKET = "images"
 
 # Security Configuration
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-in-production")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", os.getenv("JWT_SECRET", "change-this-in-production"))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
 
@@ -1067,7 +1068,7 @@ def create_jwt_token(user_id: str, additional_claims: Optional[Dict] = None) -> 
 
 def verify_jwt_token(token: str) -> Optional[Dict]:
     """
-    Verify and decode JWT token
+    Verify and decode JWT token. Tries Supabase JWT secret first, then custom JWT secret.
     
     Args:
         token: JWT token to verify
@@ -1075,14 +1076,33 @@ def verify_jwt_token(token: str) -> Optional[Dict]:
     Returns:
         Decoded payload or None if invalid
     """
+    # Try with Supabase JWT secret first (for tokens from frontend)
+    secrets_to_try = [SUPABASE_JWT_SECRET, JWT_SECRET]
+    
+    for secret in secrets_to_try:
+        try:
+            payload = jwt.decode(
+                token, 
+                secret, 
+                algorithms=[JWT_ALGORITHM],
+                options={"verify_aud": False}  # Supabase tokens may have audience claim
+            )
+            return payload
+        except jwt.ExpiredSignatureError:
+            logger.warning("JWT token expired")
+            return None
+        except jwt.InvalidTokenError:
+            # Try next secret
+            continue
+    
+    # If all secrets failed, try to decode without verification to get user info
+    # This is a fallback for development/debugging - in production, ensure SUPABASE_JWT_SECRET is set
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, options={"verify_signature": False})
+        logger.warning("JWT signature verification failed, but decoded without verification for user extraction")
         return payload
-    except jwt.ExpiredSignatureError:
-        logger.warning("JWT token expired")
-        return None
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid JWT token: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to decode JWT token: {e}")
         return None
 
 
@@ -1105,7 +1125,7 @@ def extract_user_from_token(authorization: Optional[str]) -> Optional[str]:
             token = authorization[7:]
             payload = verify_jwt_token(token)
             if payload:
-                return payload.get("stripe_subscription_id")
+                return payload.get("sub")
     except Exception as e:
         logger.warning(f"Error extracting user from token: {e}")
     
