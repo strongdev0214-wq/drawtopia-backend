@@ -6,6 +6,7 @@ Handles processing of book generation jobs with format-specific parallelization
 import logging
 import asyncio
 import time
+import os
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from queue_manager import QueueManager, JobStatus, StageStatus, StageName
@@ -960,7 +961,7 @@ class BatchProcessor:
             return False
     
     async def _queue_book_completion_email(self, job_id: int, job: Dict[str, Any], job_data: Dict[str, Any]):
-        """Queue book completion email after successful generation"""
+        """Queue book completion email after successful generation (or gift delivery email if it's a gift)"""
         try:
             if not self.email_queue_manager or not self.supabase:
                 logger.warning("Email queue manager or Supabase not available, skipping book completion email")
@@ -1006,11 +1007,56 @@ class BatchProcessor:
             book_title = story.get("title", "Your Story")
             
             # Generate preview and download links
-            frontend_url = "http://localhost:5173"  # TODO: Get from environment variable
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
             preview_link = f"{frontend_url}/story/{book_id}"
             download_link = f"{frontend_url}/api/books/{book_id}/download"
             
-            # Prepare email data
+            # Check if this book is associated with a gift order
+            # Note: You'll need to create a gift_orders table that links to stories/books
+            # For now, checking if story has gift metadata
+            is_gift = story.get("is_gift", False) or story.get("gift_order_id")
+            
+            if is_gift:
+                # This is a gift - queue gift delivery email
+                gift_order_id = story.get("gift_order_id")
+                
+                # Get gift order details if available
+                if gift_order_id:
+                    gift_result = self.supabase.table("gift_orders").select("*").eq("id", gift_order_id).execute()
+                    if gift_result.data and len(gift_result.data) > 0:
+                        gift = gift_result.data[0]
+                        recipient_email = gift.get("recipient_email")
+                        recipient_name = gift.get("recipient_name", "there")
+                        giver_name = gift.get("giver_name", user_name)
+                        gift_message = gift.get("gift_message", "Enjoy your special story!")
+                        
+                        # Queue gift delivery email
+                        result = self.email_queue_manager.queue_email(
+                            email_type="gift_delivery",
+                            to_email=recipient_email,
+                            email_data={
+                                "recipient_name": recipient_name,
+                                "giver_name": giver_name,
+                                "character_name": job_data.get("character_name", "Your Character"),
+                                "character_type": job_data.get("character_type", "Character"),
+                                "book_title": book_title,
+                                "special_ability": job_data.get("special_ability", "special powers"),
+                                "gift_message": gift_message,
+                                "story_link": preview_link,
+                                "download_link": download_link,
+                                "book_format": job.get("job_type", "story_adventure")
+                            },
+                            priority=2
+                        )
+                        
+                        if result.get("id"):
+                            logger.info(f"✅ Gift delivery email queued for {recipient_email} (Job {job_id})")
+                        else:
+                            logger.error(f"❌ Failed to queue gift delivery email: {result.get('error')}")
+                        
+                        return  # Exit early after sending gift email
+            
+            # Regular book completion email
             email_data = {
                 "parent_name": user_name,
                 "child_name": child_name,
