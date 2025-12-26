@@ -1,57 +1,62 @@
 """
 Email Service for Drawtopia
-Uses Resend for sending transactional emails (free tier: 100 emails/day)
+Uses Gmail SMTP for sending transactional emails (no domain verification needed)
 
 Supported email types:
+- Welcome email on registration
+- Parental consent verification
+- Book completion notification
 - Payment success confirmation
 - Payment failure notification
 - Subscription cancellation confirmation
 - Subscription activation confirmation
+- Subscription renewal reminders
+- Gift notification emails
+- Gift delivery emails
 
 Setup:
-1. Create account at https://resend.com
-2. Get API key from dashboard
-3. Add RESEND_API_KEY to .env
-4. (Optional) Add custom domain later for branded emails
+1. Enable 2-Step Verification in your Google Account
+2. Go to Google Account → Security → App passwords
+3. Create an App Password for "Mail"
+4. Add GMAIL_ADDRESS and GMAIL_APP_PASSWORD to .env
 """
 
 import os
 import logging
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Optional, Dict, Any
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Try to import resend, gracefully handle if not installed
-try:
-    import resend
-    RESEND_AVAILABLE = True
-except ImportError:
-    RESEND_AVAILABLE = False
-    logger.warning("Resend package not installed. Run: pip install resend")
+# Gmail SMTP Configuration
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+GMAIL_SMTP_SERVER = "smtp.gmail.com"
+GMAIL_SMTP_PORT = 587  # TLS port
 
-# Configuration
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "onboarding@resend.dev")  # Use resend.dev for testing
+# General Configuration
+FROM_EMAIL = os.getenv("FROM_EMAIL", GMAIL_ADDRESS)
 FROM_NAME = os.getenv("FROM_NAME", "Drawtopia")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
-# Initialize Resend
-if RESEND_API_KEY and RESEND_AVAILABLE:
-    resend.api_key = RESEND_API_KEY
-    logger.info("✅ Email service (Resend) initialized successfully")
+# Initialize email service
+if GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
+    logger.info("✅ Email service (Gmail SMTP) initialized successfully")
+    EMAIL_ENABLED = True
 else:
-    if not RESEND_AVAILABLE:
-        logger.warning("⚠️ Resend package not available. Email notifications disabled.")
-    else:
-        logger.warning("⚠️ RESEND_API_KEY not found. Email notifications disabled.")
+    EMAIL_ENABLED = False
+    logger.warning("⚠️ Gmail SMTP not configured. Set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env")
 
 
 class EmailService:
-    """Email service for sending transactional emails"""
+    """Email service for sending transactional emails via Gmail SMTP"""
     
     def __init__(self):
-        self.enabled = bool(RESEND_API_KEY and RESEND_AVAILABLE)
+        self.enabled = EMAIL_ENABLED
         self.from_email = f"{FROM_NAME} <{FROM_EMAIL}>"
     
     def is_enabled(self) -> bool:
@@ -66,7 +71,7 @@ class EmailService:
         text_content: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Send an email using Resend
+        Send an email using Gmail SMTP
         
         Args:
             to_email: Recipient email address
@@ -82,21 +87,41 @@ class EmailService:
             return {"success": False, "error": "Email service not configured"}
         
         try:
-            params = {
-                "from": self.from_email,
-                "to": [to_email],
-                "subject": subject,
-                "html": html_content,
-            }
+            # Create message
+            message = MIMEMultipart("alternative")
+            message["Subject"] = subject
+            message["From"] = self.from_email
+            message["To"] = to_email
             
+            # Add plain text part (for email clients that don't support HTML)
             if text_content:
-                params["text"] = text_content
+                part1 = MIMEText(text_content, "plain")
+                message.attach(part1)
             
-            email = resend.Emails.send(params)
+            # Add HTML part
+            part2 = MIMEText(html_content, "html")
+            message.attach(part2)
             
-            logger.info(f"✅ Email sent successfully to {to_email}: {email.get('id', 'unknown')}")
-            return {"success": True, "id": email.get("id")}
+            # Create secure SSL/TLS context
+            context = ssl.create_default_context()
             
+            # Connect to Gmail SMTP server
+            with smtplib.SMTP(GMAIL_SMTP_SERVER, GMAIL_SMTP_PORT) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+                server.sendmail(GMAIL_ADDRESS, to_email, message.as_string())
+            
+            logger.info(f"✅ Email sent successfully to {to_email}")
+            return {"success": True, "id": f"gmail_{datetime.now().timestamp()}"}
+            
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"❌ Gmail authentication failed: {e}")
+            return {"success": False, "error": "Gmail authentication failed. Check your App Password."}
+        except smtplib.SMTPException as e:
+            logger.error(f"❌ SMTP error sending email to {to_email}: {e}")
+            return {"success": False, "error": str(e)}
         except Exception as e:
             logger.error(f"❌ Failed to send email to {to_email}: {e}")
             return {"success": False, "error": str(e)}
