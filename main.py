@@ -226,7 +226,7 @@ class ImageRequest(BaseModel):
     
     class Config:
         # Example values for API documentation
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "image_url": "https://example.com/image.jpg",
                 "prompt": "Make this image more colorful and vibrant"
@@ -246,7 +246,7 @@ class QualityValidationResponse(BaseModel):
     validation: Dict[str, Any]
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "success": True,
                 "validation": {
@@ -267,20 +267,6 @@ class QualityValidationResponse(BaseModel):
                 }
             }
         }
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "success": True,
-                "message": "Image edited and uploaded successfully",
-                "storage_info": {
-                    "uploaded": True,
-                    "url": "https://your-project.supabase.co/storage/v1/object/public/images/edited_image_123.jpg",
-                    "filename": "edited_image_123.jpg",
-                    "bucket": "images"
-                }
-            }
-        }
 
 # Request model for story generation
 class StoryRequest(BaseModel):
@@ -298,7 +284,7 @@ class StoryRequest(BaseModel):
     story_title: Optional[str] = None  # Story title
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "character_name": "Luna",
                 "character_type": "a brave dragon",
@@ -323,7 +309,7 @@ class StoryPage(BaseModel):
     consistency_validation: Optional[ConsistencyValidationResult] = None
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "text": "Meet Luna, a brave dragon who loves adventures. Luna has a special power: Luna can fly through clouds.",
                 "scene": "https://your-project.supabase.co/storage/v1/object/public/images/story_scene_page1_20240101_120000_abc123.jpg",
@@ -347,7 +333,7 @@ class StoryResponse(BaseModel):
     audio_urls: Optional[List[Optional[str]]] = None  # List of audio URLs (one per page, None if failed)
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "success": True,
                 "pages": [
