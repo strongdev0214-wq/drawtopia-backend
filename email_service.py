@@ -27,7 +27,7 @@ import smtplib
 import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -540,6 +540,115 @@ Was this a mistake? Reply to this email and we'll help!
             plan_type=plan_type
         )
     
+    async def send_parental_consent_email(
+        self,
+        to_email: str,
+        parent_name: str,
+        child_name: str,
+        consent_link: str
+    ) -> Dict[str, Any]:
+        """
+        Send parental consent verification email (COPPA compliance)
+        
+        Args:
+            to_email: Parent email address
+            parent_name: Parent's name
+            child_name: Child's name
+            consent_link: Link to consent verification (48-hour expiration)
+        """
+        subject = f"Verify your account on Drawtopia — Help {child_name} create magical stories"
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px 16px 0 0; padding: 40px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎨 Drawtopia</h1>
+            <p style="color: rgba(255,255,255,0.9); margin-top: 8px;">Where Drawings Come to Life</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: white; padding: 40px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+            <h2 style="color: #1a1a2e; margin: 0 0 20px 0;">Parental Consent Required</h2>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Hi {parent_name},
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Welcome to Drawtopia! 🎨✨
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                {child_name}'s caregiver has started setting up an account on Drawtopia, 
+                a platform that transforms children's drawings into personalized storybooks.
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                To complete the setup, we need you to verify that you consent to collect 
+                {child_name}'s information. This is required by law (COPPA compliance) and 
+                helps us keep their data safe.
+            </p>
+            
+            <!-- CTA Button -->
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{consent_link}" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block;">
+                    Verify Consent
+                </a>
+            </div>
+            
+            <p style="color: #718096; font-size: 14px; margin-bottom: 20px;">
+                Or copy this link: <a href="{consent_link}" style="color: #667eea; word-break: break-all;">{consent_link}</a>
+            </p>
+            
+            <div style="background: #fef3c7; border-radius: 12px; padding: 16px; margin: 24px 0; border-left: 4px solid #f59e0b;">
+                <p style="color: #92400e; margin: 0; font-size: 14px;">
+                    ⏰ This link expires in 48 hours
+                </p>
+            </div>
+            
+            <p style="color: #718096; font-size: 14px; text-align: center; margin-top: 32px;">
+                Questions? Reply to this email or contact hello@drawtopia.ai
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="text-align: center; padding: 24px; color: #718096; font-size: 12px;">
+            <p style="margin: 0;">© {datetime.now().year} Drawtopia. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        text_content = f"""
+Verify your account on Drawtopia — Help {child_name} create magical stories
+
+Hi {parent_name},
+
+Welcome to Drawtopia! 🎨✨
+
+{child_name}'s caregiver has started setting up an account on Drawtopia, a platform that transforms children's drawings into personalized storybooks.
+
+To complete the setup, we need you to verify that you consent to collect {child_name}'s information. This is required by law (COPPA compliance) and helps us keep their data safe.
+
+Verify Consent: {consent_link}
+
+⏰ This link expires in 48 hours
+
+Questions? Reply to this email or contact hello@drawtopia.ai
+
+© {datetime.now().year} Drawtopia
+"""
+        
+        return await self.send_email(to_email, subject, html_content, text_content)
+    
     async def send_welcome_email(
         self,
         to_email: str,
@@ -662,6 +771,711 @@ Made with 💜 for creative minds everywhere
         return await self.send_email(to_email, subject, html_content, text_content)
 
 
+    async def send_book_completion_email(
+        self,
+        to_email: str,
+        parent_name: str,
+        child_name: str,
+        character_name: str,
+        character_type: str,
+        book_title: str,
+        special_ability: str,
+        book_format: str,  # 'interactive_search' or 'story_adventure'
+        preview_link: str,
+        download_link: str,
+        story_world: Optional[str] = None,
+        adventure_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Send book completion notification (format-specific)
+        
+        Args:
+            to_email: Parent email address
+            parent_name: Parent's name
+            child_name: Child's name
+            character_name: Generated character name
+            character_type: Person/Animal/Magical Creature
+            book_title: Story title
+            special_ability: Character's special ability
+            book_format: 'interactive_search' or 'story_adventure'
+            preview_link: Link to preview/read the book (30-day expiration)
+            download_link: Link to download PDF
+            story_world: For story_adventure - Forest/Space/Underwater
+            adventure_type: For story_adventure - Treasure Hunt/Helping Friend
+        """
+        if book_format == 'interactive_search':
+            subject = f"{character_name}'s Enchanted Forest Adventure is ready! 🎮"
+            format_description = "an 8-scene Where's Waldo-style adventure in the Enchanted Forest"
+            format_details = f"""
+                <li>Format: Interactive Search (Where's Waldo style)</li>
+                <li>Scenes: 4 magical locations</li>
+                <li>Character: {character_name} ({character_type})</li>
+                <li>Special Ability: {special_ability}</li>
+                <li>Reading Time: ~15-20 minutes</li>
+"""
+        else:
+            subject = f"{character_name}'s Magical Adventure is here! 📖✨"
+            format_description = f"a 5-page adventure where {character_name} the {character_type} uses their special power"
+            format_details = f"""
+                <li>Format: Story Adventure (5-page narrative)</li>
+                <li>Pages: 5 beautifully illustrated pages</li>
+                <li>Character: {character_name} ({character_type})</li>
+                <li>Special Ability: {special_ability}</li>
+                <li>World: {story_world or 'Magical World'}</li>
+                <li>Adventure Type: {adventure_type or 'Epic Quest'}</li>
+                <li>Reading Time: ~10 minutes</li>
+"""
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px 16px 0 0; padding: 40px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎨 Drawtopia</h1>
+            <p style="color: rgba(255,255,255,0.9); margin-top: 8px;">Your Story is Ready!</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: white; padding: 40px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="background: #10b981; width: 60px; height: 60px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;">
+                    <span style="font-size: 30px;">🎉</span>
+                </div>
+            </div>
+            
+            <h2 style="color: #1a1a2e; margin: 0 0 20px 0; text-align: center;">Great news! {character_name}'s story is ready!</h2>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Hi {parent_name},
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                {child_name} created "<strong>{book_title}</strong>" — {format_description}.
+            </p>
+            
+            <!-- CTA Buttons -->
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{preview_link}" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; margin-bottom: 12px;">
+                    📖 Start Reading
+                </a>
+                <br>
+                <a href="{download_link}" style="background: #8B4CDF; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block;">
+                    💾 Download PDF
+                </a>
+            </div>
+            
+            <!-- Story Details Box -->
+            <div style="background: #f8fafc; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #667eea;">
+                <h3 style="color: #1a1a2e; margin: 0 0 16px 0; font-size: 16px;">Story Details</h3>
+                <ul style="color: #4a5568; line-height: 1.8; padding-left: 20px; margin: 0;">
+                    {format_details}
+                </ul>
+            </div>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                {child_name} will love seeing their drawing come to life! You can also print the PDF as a keepsake.
+            </p>
+            
+            <div style="background: #fef3c7; border-radius: 12px; padding: 16px; margin: 24px 0; border-left: 4px solid #f59e0b;">
+                <p style="color: #92400e; margin: 0; font-size: 14px;">
+                    💡 This book is available for 30 days. Download it now to keep forever!
+                </p>
+            </div>
+            
+            <p style="color: #718096; font-size: 14px; text-align: center; margin-top: 32px;">
+                Happy reading! 📚
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="text-align: center; padding: 24px; color: #718096; font-size: 12px;">
+            <p style="margin: 0;">© {datetime.now().year} Drawtopia. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        text_content = f"""
+{character_name}'s story is ready!
+
+Hi {parent_name},
+
+Great news! 🎉 {character_name}'s story is ready!
+
+{child_name} created "{book_title}" — {format_description}.
+
+📖 Start Reading: {preview_link}
+💾 Download PDF: {download_link}
+
+Story Details:
+- Character: {character_name} ({character_type})
+- Special Ability: {special_ability}
+- Reading Time: ~{'15-20' if book_format == 'interactive_search' else '10'} minutes
+
+{child_name} will love seeing their drawing come to life!
+
+💡 This book is available for 30 days. Download it now to keep forever!
+
+Happy reading! 📚
+
+© {datetime.now().year} Drawtopia
+"""
+        
+        return await self.send_email(to_email, subject, html_content, text_content)
+    
+    async def send_receipt_email(
+        self,
+        to_email: str,
+        customer_name: str,
+        transaction_id: str,
+        items: List[Dict[str, Any]],
+        subtotal: float,
+        tax: float,
+        total: float,
+        transaction_date: datetime
+    ) -> Dict[str, Any]:
+        """
+        Send receipt email for purchase
+        
+        Args:
+            to_email: Customer email address
+            customer_name: Customer name
+            transaction_id: Stripe transaction ID
+            items: List of purchased items [{'name': str, 'amount': float}]
+            subtotal: Subtotal amount
+            tax: Tax amount
+            total: Total amount
+            transaction_date: Date of transaction
+        """
+        subject = f"Receipt for your Drawtopia purchase (Order #{transaction_id[:8]})"
+        
+        items_html = ""
+        items_text = ""
+        for item in items:
+            items_html += f"""
+                <tr>
+                    <td style="color: #4a5568; padding: 8px 0;">{item['name']}</td>
+                    <td style="color: #1a1a2e; text-align: right;">${item['amount']:.2f}</td>
+                </tr>
+"""
+            items_text += f"- {item['name']}: ${item['amount']:.2f}\n"
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px 16px 0 0; padding: 40px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎨 Drawtopia</h1>
+            <p style="color: rgba(255,255,255,0.9); margin-top: 8px;">Receipt</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: white; padding: 40px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+            <h2 style="color: #1a1a2e; margin: 0 0 20px 0;">Thank you for your purchase!</h2>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Hi {customer_name},
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Here's your receipt for your recent Drawtopia purchase.
+            </p>
+            
+            <!-- Receipt Details Box -->
+            <div style="background: #f8fafc; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #667eea;">
+                <h3 style="color: #1a1a2e; margin: 0 0 16px 0; font-size: 16px;">Order Details</h3>
+                <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px;">
+                    <tr>
+                        <td style="color: #718096; padding: 8px 0;">Order ID</td>
+                        <td style="color: #1a1a2e; text-align: right; font-weight: 600;">{transaction_id}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #718096; padding: 8px 0;">Date</td>
+                        <td style="color: #1a1a2e; text-align: right;">{transaction_date.strftime('%B %d, %Y')}</td>
+                    </tr>
+                </table>
+                
+                <h3 style="color: #1a1a2e; margin: 16px 0 12px 0; font-size: 16px;">Items</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    {items_html}
+                    <tr style="border-top: 2px solid #e2e8f0;">
+                        <td style="color: #718096; padding: 8px 0;">Subtotal</td>
+                        <td style="color: #1a1a2e; text-align: right;">${subtotal:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #718096; padding: 8px 0;">Tax</td>
+                        <td style="color: #1a1a2e; text-align: right;">${tax:.2f}</td>
+                    </tr>
+                    <tr style="border-top: 2px solid #e2e8f0;">
+                        <td style="color: #1a1a2e; padding: 8px 0; font-weight: 600; font-size: 18px;">Total</td>
+                        <td style="color: #667eea; text-align: right; font-weight: 600; font-size: 18px;">${total:.2f}</td>
+                    </tr>
+                </table>
+            </div>
+            
+            <p style="color: #718096; font-size: 14px; text-align: center; margin-top: 32px;">
+                Need help? Reply to this email or contact hello@drawtopia.ai
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="text-align: center; padding: 24px; color: #718096; font-size: 12px;">
+            <p style="margin: 0;">© {datetime.now().year} Drawtopia. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        text_content = f"""
+Receipt for your Drawtopia purchase (Order #{transaction_id[:8]})
+
+Hi {customer_name},
+
+Thank you for your purchase! Here's your receipt.
+
+Order Details:
+- Order ID: {transaction_id}
+- Date: {transaction_date.strftime('%B %d, %Y')}
+
+Items:
+{items_text}
+Subtotal: ${subtotal:.2f}
+Tax: ${tax:.2f}
+Total: ${total:.2f}
+
+Need help? Reply to this email or contact hello@drawtopia.ai
+
+© {datetime.now().year} Drawtopia
+"""
+        
+        return await self.send_email(to_email, subject, html_content, text_content)
+    
+    async def send_subscription_renewal_reminder_email(
+        self,
+        to_email: str,
+        customer_name: str,
+        plan_type: str,
+        renewal_amount: float,
+        renewal_date: datetime,
+        manage_link: str,
+        cancel_link: str
+    ) -> Dict[str, Any]:
+        """
+        Send subscription renewal reminder (7 days before renewal)
+        
+        Args:
+            to_email: Customer email address
+            customer_name: Customer name
+            plan_type: Subscription plan type
+            renewal_amount: Amount to be charged
+            renewal_date: Date of renewal
+            manage_link: Link to manage subscription
+            cancel_link: Link to cancel subscription
+        """
+        subject = f"Your Drawtopia subscription renews on {renewal_date.strftime('%B %d')}"
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px 16px 0 0; padding: 40px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎨 Drawtopia</h1>
+            <p style="color: rgba(255,255,255,0.9); margin-top: 8px;">Subscription Renewal Reminder</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: white; padding: 40px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+            <h2 style="color: #1a1a2e; margin: 0 0 20px 0;">Your subscription renews soon</h2>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Hi {customer_name},
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                This is a friendly reminder that your <strong>{plan_type}</strong> subscription to Drawtopia 
+                will automatically renew on <strong>{renewal_date.strftime('%B %d, %Y')}</strong>.
+            </p>
+            
+            <!-- Renewal Details Box -->
+            <div style="background: #f8fafc; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #667eea;">
+                <h3 style="color: #1a1a2e; margin: 0 0 16px 0; font-size: 16px;">Renewal Details</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tr>
+                        <td style="color: #718096; padding: 8px 0;">Plan</td>
+                        <td style="color: #1a1a2e; text-align: right; font-weight: 600;">{plan_type}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #718096; padding: 8px 0;">Renewal Date</td>
+                        <td style="color: #1a1a2e; text-align: right;">{renewal_date.strftime('%B %d, %Y')}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #718096; padding: 8px 0;">Amount</td>
+                        <td style="color: #667eea; text-align: right; font-weight: 600; font-size: 18px;">${renewal_amount:.2f}</td>
+                    </tr>
+                </table>
+            </div>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                No action is needed! Your subscription will renew automatically and you'll continue to enjoy all premium features.
+            </p>
+            
+            <!-- CTA Buttons -->
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{manage_link}" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; margin-bottom: 12px;">
+                    Manage Subscription
+                </a>
+                <br>
+                <a href="{cancel_link}" style="color: #718096; text-decoration: underline; font-size: 14px;">
+                    Cancel Subscription
+                </a>
+            </div>
+            
+            <p style="color: #718096; font-size: 14px; text-align: center; margin-top: 32px;">
+                Questions? Reply to this email and we'll help!
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="text-align: center; padding: 24px; color: #718096; font-size: 12px;">
+            <p style="margin: 0;">© {datetime.now().year} Drawtopia. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        text_content = f"""
+Your Drawtopia subscription renews on {renewal_date.strftime('%B %d')}
+
+Hi {customer_name},
+
+This is a friendly reminder that your {plan_type} subscription to Drawtopia will automatically renew on {renewal_date.strftime('%B %d, %Y')}.
+
+Renewal Details:
+- Plan: {plan_type}
+- Renewal Date: {renewal_date.strftime('%B %d, %Y')}
+- Amount: ${renewal_amount:.2f}
+
+No action is needed! Your subscription will renew automatically.
+
+Manage Subscription: {manage_link}
+Cancel Subscription: {cancel_link}
+
+Questions? Reply to this email!
+
+© {datetime.now().year} Drawtopia
+"""
+        
+        return await self.send_email(to_email, subject, html_content, text_content)
+    
+    async def send_gift_notification_email(
+        self,
+        to_email: str,
+        recipient_name: str,
+        giver_name: str,
+        occasion: str,
+        gift_message: str,
+        delivery_method: str = 'immediate_email'
+    ) -> Dict[str, Any]:
+        """
+        Send gift notification email (recipient is notified of incoming gift)
+        
+        Args:
+            to_email: Gift recipient email
+            recipient_name: Recipient's name
+            giver_name: Gift giver's name
+            occasion: Occasion (Birthday, First Day of School, etc.)
+            gift_message: Personal message from giver
+            delivery_method: 'immediate_email', 'scheduled_delivery', or 'send_creation_link'
+        """
+        subject = "You've been sent a gift on Drawtopia! 🎁✨"
+        
+        delivery_info = ""
+        if delivery_method == 'immediate_email':
+            delivery_info = "Your story will be ready to read very soon! We'll send you another email when it's complete, usually within 1-2 hours."
+        elif delivery_method == 'scheduled_delivery':
+            delivery_info = "Your story will be delivered soon! Keep an eye on your email."
+        else:
+            delivery_info = f"{giver_name} is asking a grown-up in your life to help create your story. Ask them to check their email for the creation link."
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px 16px 0 0; padding: 40px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎁 Drawtopia</h1>
+            <p style="color: rgba(255,255,255,0.9); margin-top: 8px;">You've Received a Gift!</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: white; padding: 40px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%); width: 70px; height: 70px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;">
+                    <span style="font-size: 35px;">🎁</span>
+                </div>
+            </div>
+            
+            <h2 style="color: #1a1a2e; margin: 0 0 20px 0; text-align: center;">You're about to receive a very special gift! 🎉</h2>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Hi {recipient_name},
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                <strong>{giver_name}</strong> is creating a personalized storybook just for you!
+            </p>
+            
+            <!-- Gift Details Box -->
+            <div style="background: #fef3c7; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #f59e0b;">
+                <h3 style="color: #1a1a2e; margin: 0 0 16px 0; font-size: 16px;">About Your Gift</h3>
+                <ul style="color: #4a5568; line-height: 1.8; padding-left: 20px; margin: 0;">
+                    <li><strong>Occasion:</strong> {occasion}</li>
+                    <li><strong>Message from {giver_name}:</strong> "{gift_message}"</li>
+                    <li><strong>Status:</strong> Being created with your character...</li>
+                </ul>
+            </div>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                {delivery_info}
+            </p>
+            
+            <!-- How It Works Box -->
+            <div style="background: #f8fafc; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #667eea;">
+                <h3 style="color: #1a1a2e; margin: 0 0 12px 0; font-size: 16px;">How It Works</h3>
+                <ol style="color: #4a5568; line-height: 1.8; padding-left: 20px; margin: 0;">
+                    <li>Your grown-up creates your character</li>
+                    <li>We generate a magical story featuring YOU</li>
+                    <li>You read your personalized adventure!</li>
+                </ol>
+            </div>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px; text-align: center;">
+                We can't wait for you to meet your character! 🌟
+            </p>
+            
+            <p style="color: #718096; font-size: 14px; text-align: center; margin-top: 32px;">
+                Questions? Reply to this email or contact hello@drawtopia.ai
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="text-align: center; padding: 24px; color: #718096; font-size: 12px;">
+            <p style="margin: 0;">© {datetime.now().year} Drawtopia. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        text_content = f"""
+You've been sent a gift on Drawtopia! 🎁✨
+
+Hi {recipient_name},
+
+You're about to receive a very special gift! 🎉
+
+{giver_name} is creating a personalized storybook just for you!
+
+About Your Gift:
+- Occasion: {occasion}
+- Message from {giver_name}: "{gift_message}"
+- Status: Being created with your character...
+
+{delivery_info}
+
+How It Works:
+1. Your grown-up creates your character
+2. We generate a magical story featuring YOU
+3. You read your personalized adventure!
+
+We can't wait for you to meet your character! 🌟
+
+Questions? Reply to this email or contact hello@drawtopia.ai
+
+© {datetime.now().year} Drawtopia
+"""
+        
+        return await self.send_email(to_email, subject, html_content, text_content)
+    
+    async def send_gift_delivery_email(
+        self,
+        to_email: str,
+        recipient_name: str,
+        giver_name: str,
+        character_name: str,
+        character_type: str,
+        book_title: str,
+        special_ability: str,
+        gift_message: str,
+        story_link: str,
+        download_link: str,
+        book_format: str = 'story_adventure'
+    ) -> Dict[str, Any]:
+        """
+        Send gift delivery email (final story delivered to recipient)
+        
+        Args:
+            to_email: Gift recipient email
+            recipient_name: Recipient's name
+            giver_name: Gift giver's name
+            character_name: Character name
+            character_type: Person/Animal/Magical Creature
+            book_title: Story title
+            special_ability: Character's special ability
+            gift_message: Personal message from giver
+            story_link: Link to read the story
+            download_link: Link to download PDF
+            book_format: 'interactive_search' or 'story_adventure'
+        """
+        subject = f"Your gift has arrived! Open '{book_title}' now 🎁📖"
+        
+        format_info = "4-scene Where's Waldo-style adventure" if book_format == 'interactive_search' else "5-page magical adventure"
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px 16px 0 0; padding: 40px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">🎁 Drawtopia</h1>
+            <p style="color: rgba(255,255,255,0.9); margin-top: 8px;">Your Gift Has Arrived!</p>
+        </div>
+        
+        <!-- Content -->
+        <div style="background: white; padding: 40px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <div style="background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%); width: 70px; height: 70px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;">
+                    <span style="font-size: 35px;">🎁</span>
+                </div>
+            </div>
+            
+            <h2 style="color: #1a1a2e; margin: 0 0 20px 0; text-align: center;">Your gift is here! 🎉✨</h2>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Hi {recipient_name},
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                <strong>{giver_name}</strong> created a special personalized storybook just for you called:
+            </p>
+            
+            <h3 style="color: #667eea; text-align: center; font-size: 22px; margin: 24px 0;">
+                📖 "{book_title}"
+            </h3>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                Featuring the character YOU created: <strong>{character_name}</strong>, a {character_type} 
+                with the special ability to {special_ability}!
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                It's a {format_info} where you'll have an amazing adventure!
+            </p>
+            
+            <!-- CTA Buttons -->
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{story_link}" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; margin-bottom: 12px;">
+                    🎬 Open Your Gift
+                </a>
+                <br>
+                <a href="{download_link}" style="background: #8B4CDF; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block;">
+                    📥 Download PDF
+                </a>
+            </div>
+            
+            <!-- Gift Message Box -->
+            <div style="background: #fef3c7; border-radius: 12px; padding: 24px; margin: 24px 0; border-left: 4px solid #f59e0b;">
+                <p style="color: #92400e; margin: 0;">
+                    <strong>From {giver_name}:</strong><br>
+                    "{gift_message}"
+                </p>
+            </div>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px;">
+                This is your special copy! Only you can access it. You can read it anytime, share it with friends, or download it to keep forever. 💫
+            </p>
+            
+            <p style="color: #4a5568; line-height: 1.6; margin-bottom: 20px; text-align: center;">
+                Happy reading!
+            </p>
+            
+            <p style="color: #718096; font-size: 14px; text-align: center; margin-top: 32px;">
+                Love your gift? Send a thank you to {giver_name}!
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div style="text-align: center; padding: 24px; color: #718096; font-size: 12px;">
+            <p style="margin: 0;">© {datetime.now().year} Drawtopia. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        text_content = f"""
+Your gift has arrived! Open '{book_title}' now 🎁📖
+
+Hi {recipient_name},
+
+Your gift is here! 🎉✨
+
+{giver_name} created a special personalized storybook just for you called:
+
+📖 "{book_title}"
+
+Featuring {character_name}, a {character_type} with the special ability to {special_ability}!
+
+It's a {format_info} where you'll have an amazing adventure!
+
+🎬 Open Your Gift: {story_link}
+📥 Download PDF: {download_link}
+
+From {giver_name}: "{gift_message}"
+
+This is your special copy! You can read it anytime, share it with friends, or download it to keep forever. 💫
+
+Happy reading!
+
+Love your gift? Send a thank you to {giver_name}!
+
+© {datetime.now().year} Drawtopia
+"""
+        
+        return await self.send_email(to_email, subject, html_content, text_content)
+
+
 # Create a singleton instance
 email_service = EmailService()
 
@@ -690,4 +1504,34 @@ async def send_subscription_activated(to_email: str, **kwargs) -> Dict[str, Any]
 async def send_welcome(to_email: str, **kwargs) -> Dict[str, Any]:
     """Send welcome email on registration"""
     return await email_service.send_welcome_email(to_email, **kwargs)
+
+
+async def send_parental_consent(to_email: str, **kwargs) -> Dict[str, Any]:
+    """Send parental consent verification email"""
+    return await email_service.send_parental_consent_email(to_email, **kwargs)
+
+
+async def send_book_completion(to_email: str, **kwargs) -> Dict[str, Any]:
+    """Send book completion notification"""
+    return await email_service.send_book_completion_email(to_email, **kwargs)
+
+
+async def send_receipt(to_email: str, **kwargs) -> Dict[str, Any]:
+    """Send receipt email"""
+    return await email_service.send_receipt_email(to_email, **kwargs)
+
+
+async def send_subscription_renewal_reminder(to_email: str, **kwargs) -> Dict[str, Any]:
+    """Send subscription renewal reminder email"""
+    return await email_service.send_subscription_renewal_reminder_email(to_email, **kwargs)
+
+
+async def send_gift_notification(to_email: str, **kwargs) -> Dict[str, Any]:
+    """Send gift notification email"""
+    return await email_service.send_gift_notification_email(to_email, **kwargs)
+
+
+async def send_gift_delivery(to_email: str, **kwargs) -> Dict[str, Any]:
+    """Send gift delivery email"""
+    return await email_service.send_gift_delivery_email(to_email, **kwargs)
 

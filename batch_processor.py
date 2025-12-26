@@ -31,7 +31,8 @@ class BatchProcessor:
         gemini_client,
         openai_api_key: str,
         supabase_client,
-        gemini_text_model: str = "gemini-2.5-flash"
+        gemini_text_model: str = "gemini-2.5-flash",
+        email_queue_manager=None
     ):
         self.queue_manager = queue_manager
         self.gemini_client = gemini_client
@@ -39,6 +40,7 @@ class BatchProcessor:
         self.supabase = supabase_client
         self.storage_bucket = "images"
         self.gemini_text_model = gemini_text_model
+        self.email_queue_manager = email_queue_manager
     
     async def process_job(self, job_id: int) -> bool:
         """
@@ -85,6 +87,9 @@ class BatchProcessor:
             if success:
                 self.queue_manager.update_job_status(job_id, JobStatus.COMPLETED)
                 logger.info(f"Job {job_id} completed successfully")
+                
+                # Queue book completion email
+                await self._queue_book_completion_email(job_id, job, job_data)
             else:
                 # Check if we should retry
                 if job["retry_count"] < job["max_retries"]:
@@ -953,4 +958,86 @@ class BatchProcessor:
         except Exception as e:
             logger.error(f"Error updating story with PDF URL: {e}")
             return False
+    
+    async def _queue_book_completion_email(self, job_id: int, job: Dict[str, Any], job_data: Dict[str, Any]):
+        """Queue book completion email after successful generation"""
+        try:
+            if not self.email_queue_manager or not self.supabase:
+                logger.warning("Email queue manager or Supabase not available, skipping book completion email")
+                return
+            
+            # Get user and child profile information
+            user_id = job.get("user_id")
+            child_profile_id = job.get("child_profile_id")
+            
+            if not user_id:
+                logger.warning(f"No user_id for job {job_id}, skipping book completion email")
+                return
+            
+            # Get user details
+            user_result = self.supabase.table("users").select("email, first_name, last_name").eq("id", user_id).execute()
+            if not user_result.data or len(user_result.data) == 0:
+                logger.warning(f"User {user_id} not found, skipping book completion email")
+                return
+            
+            user = user_result.data[0]
+            user_email = user.get("email")
+            user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "there"
+            
+            if not user_email:
+                logger.warning(f"No email for user {user_id}, skipping book completion email")
+                return
+            
+            # Get child profile details if available
+            child_name = "your child"
+            if child_profile_id:
+                child_result = self.supabase.table("child_profiles").select("first_name").eq("id", child_profile_id).execute()
+                if child_result.data and len(child_result.data) > 0:
+                    child_name = child_result.data[0].get("first_name", child_name)
+            
+            # Get book/story details
+            story_result = self.supabase.table("stories").select("*").eq("job_id", job_id).execute()
+            if not story_result.data or len(story_result.data) == 0:
+                logger.warning(f"No story found for job {job_id}, skipping book completion email")
+                return
+            
+            story = story_result.data[0]
+            book_id = story.get("id")
+            book_title = story.get("title", "Your Story")
+            
+            # Generate preview and download links
+            frontend_url = "http://localhost:5173"  # TODO: Get from environment variable
+            preview_link = f"{frontend_url}/story/{book_id}"
+            download_link = f"{frontend_url}/api/books/{book_id}/download"
+            
+            # Prepare email data
+            email_data = {
+                "parent_name": user_name,
+                "child_name": child_name,
+                "character_name": job_data.get("character_name", "Your Character"),
+                "character_type": job_data.get("character_type", "Character"),
+                "book_title": book_title,
+                "special_ability": job_data.get("special_ability", "special powers"),
+                "book_format": job.get("job_type", "story_adventure"),
+                "preview_link": preview_link,
+                "download_link": download_link,
+                "story_world": job_data.get("story_world"),
+                "adventure_type": job_data.get("adventure_type")
+            }
+            
+            # Queue the email
+            result = self.email_queue_manager.queue_email(
+                email_type="book_completion",
+                to_email=user_email,
+                email_data=email_data,
+                priority=2
+            )
+            
+            if result.get("id"):
+                logger.info(f"✅ Book completion email queued for {user_email} (Job {job_id})")
+            else:
+                logger.error(f"❌ Failed to queue book completion email: {result.get('error')}")
+                
+        except Exception as e:
+            logger.error(f"Error queueing book completion email for job {job_id}: {e}")
 
