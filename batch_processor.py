@@ -1023,7 +1023,7 @@ class BatchProcessor:
                 # Send gift delivery email
                 if email_service.is_enabled():
                     try:
-                        send_gift_delivery(
+                        await send_gift_delivery(
                             to_email=gift_data.get("delivery_email"),
                             recipient_name=gift_data.get("child_name", "there"),
                             giver_name=giver_name,
@@ -1070,7 +1070,7 @@ class BatchProcessor:
             # Send the email
             if email_service.is_enabled():
                 try:
-                    send_book_completion(
+                    await send_book_completion(
                         to_email=user_email,
                         parent_name=user_name,
                         child_name=child_name,

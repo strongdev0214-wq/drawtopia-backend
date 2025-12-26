@@ -3480,7 +3480,7 @@ async def handle_payment_succeeded(invoice):
                     amount_display = f"${amount_paid / 100:.2f}" if amount_paid else None
                     
                     # Send payment success email
-                    send_payment_success(
+                    await send_payment_success(
                         to_email=customer_email,
                         customer_name=customer_name,
                         plan_type=plan_type,
@@ -3490,7 +3490,7 @@ async def handle_payment_succeeded(invoice):
                     logger.info(f"✅ Payment success email sent to {customer_email}")
                     
                     # Also send receipt email
-                    send_receipt(
+                    await send_receipt(
                         to_email=customer_email,
                         customer_name=customer_name or "Customer",
                         transaction_id=invoice.get("id", "N/A"),
@@ -3580,7 +3580,7 @@ async def handle_payment_failed(invoice):
             else:
                 try:
                     amount_display = f"${amount_due / 100:.2f}" if amount_due else None
-                    send_payment_failed(
+                    await send_payment_failed(
                         to_email=customer_email,
                         customer_name=customer_name,
                         plan_type=plan_type,
@@ -3648,7 +3648,7 @@ async def send_parental_consent_email_endpoint(request: Request):
         consent_link = f"{FRONTEND_URL}/consent/verify?token={consent_token}"
         
         # Send the email
-        send_parental_consent(
+        await send_parental_consent(
             to_email=parent_email,
             parent_name=parent_name,
             child_name=child_name,
@@ -3691,7 +3691,7 @@ async def send_gift_notification_email_endpoint(request: Request):
             )
         
         # Send the email (Note: scheduled sending not supported without queue)
-        send_gift_notification(
+        await send_gift_notification(
             to_email=recipient_email,
             recipient_name=recipient_name,
             giver_name=giver_name,
@@ -3747,7 +3747,7 @@ async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
             
             if email_service.is_enabled():
                 try:
-                    send_welcome(
+                    await send_welcome(
                         to_email=email,
                         customer_name=customer_name
                     )
