@@ -1150,6 +1150,10 @@ async def root(request: Request):
         "security": {
             "rate_limiting": "enabled",
             "jwt_expiration": f"{JWT_EXPIRATION_HOURS} hours"
+        },
+        "email_service": {
+            "enabled": email_service.is_enabled(),
+            "provider": "Gmail SMTP"
         }
     }
 
@@ -3456,24 +3460,39 @@ async def handle_payment_succeeded(invoice):
                         logger.info(f"Updated user {user_id} with active subscription on payment success")
             
             # Send payment success email
-            if customer_email and email_service.is_enabled():
-                amount_display = f"${amount_paid / 100:.2f}" if amount_paid else None
-                await send_payment_success(
-                    to_email=customer_email,
-                    customer_name=customer_name,
-                    plan_type=plan_type,
-                    amount=amount_display,
-                    next_billing_date=next_billing_date
-                )
-                logger.info(f"Sent payment success email to {customer_email}")
+            logger.info(f"Attempting to send payment success email - Email: {customer_email}, Service enabled: {email_service.is_enabled()}")
+            
+            if not customer_email:
+                logger.warning("Cannot send payment success email: customer_email is missing")
+            elif not email_service.is_enabled():
+                logger.warning("Cannot send payment success email: email service not enabled")
+            else:
+                try:
+                    amount_display = f"${amount_paid / 100:.2f}" if amount_paid else None
+                    result = await send_payment_success(
+                        to_email=customer_email,
+                        customer_name=customer_name,
+                        plan_type=plan_type,
+                        amount=amount_display,
+                        next_billing_date=next_billing_date
+                    )
+                    if result.get("success"):
+                        logger.info(f"✅ Payment success email sent to {customer_email}")
+                    else:
+                        logger.error(f"❌ Failed to send payment success email: {result.get('error')}")
+                except Exception as email_error:
+                    logger.error(f"❌ Exception sending payment success email: {email_error}")
                 
     except Exception as e:
         logger.error(f"Error handling payment succeeded: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 async def handle_payment_failed(invoice):
     """Handle failed payment"""
     try:
+        logger.info(f"Processing payment failed event")
         subscription_id = invoice.get("subscription")
         customer_id = invoice.get("customer")
         customer_email = invoice.get("customer_email")
@@ -3518,18 +3537,32 @@ async def handle_payment_failed(invoice):
                 }).eq("stripe_subscription_id", subscription_id).execute()
             
             # Send payment failed email
-            if customer_email and email_service.is_enabled():
-                amount_display = f"${amount_due / 100:.2f}" if amount_due else None
-                await send_payment_failed(
-                    to_email=customer_email,
-                    customer_name=customer_name,
-                    plan_type=plan_type,
-                    amount=amount_display
-                )
-                logger.info(f"Sent payment failed email to {customer_email}")
+            logger.info(f"Attempting to send payment failed email - Email: {customer_email}, Service enabled: {email_service.is_enabled()}")
+            
+            if not customer_email:
+                logger.warning("Cannot send payment failed email: customer_email is missing")
+            elif not email_service.is_enabled():
+                logger.warning("Cannot send payment failed email: email service not enabled")
+            else:
+                try:
+                    amount_display = f"${amount_due / 100:.2f}" if amount_due else None
+                    result = await send_payment_failed(
+                        to_email=customer_email,
+                        customer_name=customer_name,
+                        plan_type=plan_type,
+                        amount=amount_display
+                    )
+                    if result.get("success"):
+                        logger.info(f"✅ Payment failed email sent to {customer_email}")
+                    else:
+                        logger.error(f"❌ Failed to send payment failed email: {result.get('error')}")
+                except Exception as email_error:
+                    logger.error(f"❌ Exception sending payment failed email: {email_error}")
                 
     except Exception as e:
         logger.error(f"Error handling payment failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 @app.get("/api/stripe/config")
