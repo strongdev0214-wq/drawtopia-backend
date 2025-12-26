@@ -3379,14 +3379,26 @@ async def handle_subscription_deleted(subscription):
 async def handle_payment_succeeded(invoice):
     """Handle successful payment"""
     try:
+        # Try to get subscription ID from multiple locations
         subscription_id = invoice.get("subscription")
+        
+        # If not at top level, try nested in parent.subscription_details
+        if not subscription_id:
+            subscription_id = invoice.get("parent", {}).get("subscription_details", {}).get("subscription")
+        
+        # If still not found, try from line items
+        if not subscription_id:
+            lines_data = invoice.get("lines", {}).get("data", [])
+            if lines_data:
+                subscription_id = lines_data[0].get("parent", {}).get("subscription_item_details", {}).get("subscription")
+        
         customer_id = invoice.get("customer")
         customer_email = invoice.get("customer_email")
         customer_name = invoice.get("customer_name")
         amount_paid = invoice.get("amount_paid", 0)
         
-        logger.info(f"Payment succeeded for subscription: {invoice}")
         if subscription_id:
+            logger.info(f"Payment succeeded for subscription: {subscription_id}")
             
             # Get subscription details from Stripe
             plan_type = "monthly"
@@ -3479,7 +3491,20 @@ async def handle_payment_failed(invoice):
     """Handle failed payment"""
     try:
         logger.info(f"Processing payment failed event")
+        
+        # Try to get subscription ID from multiple locations
         subscription_id = invoice.get("subscription")
+        
+        # If not at top level, try nested in parent.subscription_details
+        if not subscription_id:
+            subscription_id = invoice.get("parent", {}).get("subscription_details", {}).get("subscription")
+        
+        # If still not found, try from line items
+        if not subscription_id:
+            lines_data = invoice.get("lines", {}).get("data", [])
+            if lines_data:
+                subscription_id = lines_data[0].get("parent", {}).get("subscription_item_details", {}).get("subscription")
+        
         customer_id = invoice.get("customer")
         customer_email = invoice.get("customer_email")
         customer_name = invoice.get("customer_name")
