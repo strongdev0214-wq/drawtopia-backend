@@ -3385,8 +3385,8 @@ async def handle_payment_succeeded(invoice):
         customer_name = invoice.get("customer_name")
         amount_paid = invoice.get("amount_paid", 0)
         
+        logger.info(f"Payment succeeded for subscription: {subscription_id}")
         if subscription_id:
-            logger.info(f"Payment succeeded for subscription: {subscription_id}")
             
             # Get subscription details from Stripe
             plan_type = "monthly"
