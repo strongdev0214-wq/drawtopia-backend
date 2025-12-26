@@ -32,8 +32,7 @@ class BatchProcessor:
         gemini_client,
         openai_api_key: str,
         supabase_client,
-        gemini_text_model: str = "gemini-2.5-flash",
-        email_queue_manager=None
+        gemini_text_model: str = "gemini-2.5-flash"
     ):
         self.queue_manager = queue_manager
         self.gemini_client = gemini_client
@@ -41,7 +40,6 @@ class BatchProcessor:
         self.supabase = supabase_client
         self.storage_bucket = "images"
         self.gemini_text_model = gemini_text_model
-        self.email_queue_manager = email_queue_manager
     
     async def process_job(self, job_id: int) -> bool:
         """
@@ -89,8 +87,8 @@ class BatchProcessor:
                 self.queue_manager.update_job_status(job_id, JobStatus.COMPLETED)
                 logger.info(f"Job {job_id} completed successfully")
                 
-                # Queue book completion email
-                await self._queue_book_completion_email(job_id, job, job_data)
+                # Send book completion email
+                await self._send_book_completion_email(job_id, job, job_data)
             else:
                 # Check if we should retry
                 if job["retry_count"] < job["max_retries"]:
@@ -960,12 +958,19 @@ class BatchProcessor:
             logger.error(f"Error updating story with PDF URL: {e}")
             return False
     
-    async def _queue_book_completion_email(self, job_id: int, job: Dict[str, Any], job_data: Dict[str, Any]):
-        """Queue book completion email after successful generation (or gift delivery email if it's a gift)"""
+    async def _send_book_completion_email(self, job_id: int, job: Dict[str, Any], job_data: Dict[str, Any]):
+        """Send book completion email after successful generation"""
         try:
-            if not self.email_queue_manager or not self.supabase:
-                logger.warning("Email queue manager or Supabase not available, skipping book completion email")
+            if not self.supabase:
+                logger.warning("Supabase not available, skipping book completion email")
                 return
+            
+            # Import email functions
+            from email_service import (
+                email_service,
+                send_book_completion,
+                send_gift_delivery
+            )
             
             # Get user and child profile information
             user_id = job.get("user_id")
@@ -975,6 +980,72 @@ class BatchProcessor:
                 logger.warning(f"No user_id for job {job_id}, skipping book completion email")
                 return
             
+            # Get book/story details first
+            story_result = self.supabase.table("stories").select("*").eq("job_id", job_id).execute()
+            if not story_result.data or len(story_result.data) == 0:
+                logger.warning(f"No story found for job {job_id}, skipping book completion email")
+                return
+            
+            story = story_result.data[0]
+            book_id = story.get("id")
+            book_title = story.get("title", "Your Story")
+            
+            # Check if this book is linked to a gift order
+            gift_result = self.supabase.table("gifts").select("*").eq("child_profile_id", str(child_profile_id)).execute()
+            
+            is_gift = False
+            gift_data = None
+            if gift_result.data and len(gift_result.data) > 0:
+                # Find the most recent gift for this child profile that matches
+                for gift in gift_result.data:
+                    if gift.get("status") == "generating" or gift.get("status") == "completed":
+                        is_gift = True
+                        gift_data = gift
+                        break
+            
+            # Generate preview and download links
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+            preview_link = f"{frontend_url}/story/{book_id}"
+            download_link = f"{frontend_url}/api/books/{book_id}/download"
+            
+            if is_gift and gift_data:
+                # This is a gift - send gift delivery email instead
+                logger.info(f"Book {book_id} is a gift, sending gift delivery email")
+                
+                # Get giver details
+                giver_id = gift_data.get("from_user_id") or gift_data.get("user_id")
+                giver_result = self.supabase.table("users").select("first_name, last_name").eq("id", giver_id).execute()
+                giver_name = "Someone special"
+                if giver_result.data and len(giver_result.data) > 0:
+                    giver = giver_result.data[0]
+                    giver_name = f"{giver.get('first_name', '')} {giver.get('last_name', '')}".strip() or giver_name
+                
+                # Send gift delivery email
+                if email_service.is_enabled():
+                    try:
+                        send_gift_delivery(
+                            to_email=gift_data.get("delivery_email"),
+                            recipient_name=gift_data.get("child_name", "there"),
+                            giver_name=giver_name,
+                            character_name=job_data.get("character_name", "Your Character"),
+                            character_type=job_data.get("character_type", "Character"),
+                            book_title=book_title,
+                            special_ability=job_data.get("special_ability", "special powers"),
+                            gift_message=gift_data.get("special_msg", "Enjoy your special story!"),
+                            story_link=preview_link,
+                            download_link=download_link,
+                            book_format=job.get("job_type", "story_adventure")
+                        )
+                        logger.info(f"✅ Gift delivery email sent to {gift_data.get('delivery_email')} (Job {job_id})")
+                        
+                        # Update gift status to completed
+                        self.supabase.table("gifts").update({"status": "completed"}).eq("id", gift_data.get("id")).execute()
+                    except Exception as email_error:
+                        logger.error(f"❌ Failed to send gift delivery email: {email_error}")
+                
+                return
+            
+            # Not a gift - send regular book completion email
             # Get user details
             user_result = self.supabase.table("users").select("email, first_name, last_name").eq("id", user_id).execute()
             if not user_result.data or len(user_result.data) == 0:
@@ -996,94 +1067,27 @@ class BatchProcessor:
                 if child_result.data and len(child_result.data) > 0:
                     child_name = child_result.data[0].get("first_name", child_name)
             
-            # Get book/story details
-            story_result = self.supabase.table("stories").select("*").eq("job_id", job_id).execute()
-            if not story_result.data or len(story_result.data) == 0:
-                logger.warning(f"No story found for job {job_id}, skipping book completion email")
-                return
-            
-            story = story_result.data[0]
-            book_id = story.get("id")
-            book_title = story.get("title", "Your Story")
-            
-            # Generate preview and download links
-            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-            preview_link = f"{frontend_url}/story/{book_id}"
-            download_link = f"{frontend_url}/api/books/{book_id}/download"
-            
-            # Check if this book is associated with a gift order
-            # Note: You'll need to create a gift_orders table that links to stories/books
-            # For now, checking if story has gift metadata
-            is_gift = story.get("is_gift", False) or story.get("gift_order_id")
-            
-            if is_gift:
-                # This is a gift - queue gift delivery email
-                gift_order_id = story.get("gift_order_id")
-                
-                # Get gift order details if available
-                if gift_order_id:
-                    gift_result = self.supabase.table("gift_orders").select("*").eq("id", gift_order_id).execute()
-                    if gift_result.data and len(gift_result.data) > 0:
-                        gift = gift_result.data[0]
-                        recipient_email = gift.get("recipient_email")
-                        recipient_name = gift.get("recipient_name", "there")
-                        giver_name = gift.get("giver_name", user_name)
-                        gift_message = gift.get("gift_message", "Enjoy your special story!")
-                        
-                        # Queue gift delivery email
-                        result = self.email_queue_manager.queue_email(
-                            email_type="gift_delivery",
-                            to_email=recipient_email,
-                            email_data={
-                                "recipient_name": recipient_name,
-                                "giver_name": giver_name,
-                                "character_name": job_data.get("character_name", "Your Character"),
-                                "character_type": job_data.get("character_type", "Character"),
-                                "book_title": book_title,
-                                "special_ability": job_data.get("special_ability", "special powers"),
-                                "gift_message": gift_message,
-                                "story_link": preview_link,
-                                "download_link": download_link,
-                                "book_format": job.get("job_type", "story_adventure")
-                            },
-                            priority=2
-                        )
-                        
-                        if result.get("id"):
-                            logger.info(f"✅ Gift delivery email queued for {recipient_email} (Job {job_id})")
-                        else:
-                            logger.error(f"❌ Failed to queue gift delivery email: {result.get('error')}")
-                        
-                        return  # Exit early after sending gift email
-            
-            # Regular book completion email
-            email_data = {
-                "parent_name": user_name,
-                "child_name": child_name,
-                "character_name": job_data.get("character_name", "Your Character"),
-                "character_type": job_data.get("character_type", "Character"),
-                "book_title": book_title,
-                "special_ability": job_data.get("special_ability", "special powers"),
-                "book_format": job.get("job_type", "story_adventure"),
-                "preview_link": preview_link,
-                "download_link": download_link,
-                "story_world": job_data.get("story_world"),
-                "adventure_type": job_data.get("adventure_type")
-            }
-            
-            # Queue the email
-            result = self.email_queue_manager.queue_email(
-                email_type="book_completion",
-                to_email=user_email,
-                email_data=email_data,
-                priority=2
-            )
-            
-            if result.get("id"):
-                logger.info(f"✅ Book completion email queued for {user_email} (Job {job_id})")
-            else:
-                logger.error(f"❌ Failed to queue book completion email: {result.get('error')}")
+            # Send the email
+            if email_service.is_enabled():
+                try:
+                    send_book_completion(
+                        to_email=user_email,
+                        parent_name=user_name,
+                        child_name=child_name,
+                        character_name=job_data.get("character_name", "Your Character"),
+                        character_type=job_data.get("character_type", "Character"),
+                        book_title=book_title,
+                        special_ability=job_data.get("special_ability", "special powers"),
+                        book_format=job.get("job_type", "story_adventure"),
+                        preview_link=preview_link,
+                        download_link=download_link,
+                        story_world=job_data.get("story_world"),
+                        adventure_type=job_data.get("adventure_type")
+                    )
+                    logger.info(f"✅ Book completion email sent to {user_email} (Job {job_id})")
+                except Exception as email_error:
+                    logger.error(f"❌ Failed to send book completion email: {email_error}")
                 
         except Exception as e:
-            logger.error(f"Error queueing book completion email for job {job_id}: {e}")
+            logger.error(f"Error sending book completion email for job {job_id}: {e}")
 

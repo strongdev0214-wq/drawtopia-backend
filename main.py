@@ -42,15 +42,7 @@ from email_service import (
     send_gift_notification,
     send_gift_delivery
 )
-from email_queue import (
-    EmailQueueManager,
-    queue_welcome_email,
-    queue_parental_consent_email,
-    queue_book_completion_email,
-    queue_payment_success_email,
-    queue_gift_notification_email,
-    queue_gift_delivery_email
-)
+# Email queue removed - sending emails directly now
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -141,40 +133,30 @@ else:
 # Initialize queue manager and batch processor
 queue_manager = None
 batch_processor = None
-email_queue_manager = None
 worker_task = None
-email_worker_task = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for background tasks"""
-    global queue_manager, batch_processor, email_queue_manager, worker_task, email_worker_task
+    global queue_manager, batch_processor, worker_task
     
     # Initialize queue manager
     if supabase:
         queue_manager = QueueManager(supabase)
         
-        # Initialize email queue manager
-        email_queue_manager = EmailQueueManager(supabase)
-        logger.info("✅ Email queue manager initialized")
-        
-        # Initialize batch processor with email queue manager
+        # Initialize batch processor (without email queue manager)
         batch_processor = BatchProcessor(
             queue_manager=queue_manager,
             gemini_client=gemini_client,
             openai_api_key=OPENAI_API_KEY,
             supabase_client=supabase,
-            gemini_text_model=GEMINI_TEXT_MODEL,
-            email_queue_manager=email_queue_manager
+            gemini_text_model=GEMINI_TEXT_MODEL
         )
         logger.info("✅ Queue manager and batch processor initialized")
         
-        # Start background workers
+        # Start background worker
         worker_task = asyncio.create_task(background_worker())
         logger.info("✅ Background worker started")
-        
-        email_worker_task = asyncio.create_task(email_background_worker())
-        logger.info("✅ Email background worker started")
     
     yield
     
@@ -186,14 +168,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("✅ Background worker stopped")
-    
-    if email_worker_task:
-        email_worker_task.cancel()
-        try:
-            await email_worker_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("✅ Email background worker stopped")
 
 # FastAPI app
 app = FastAPI(
@@ -1388,29 +1362,7 @@ async def background_worker():
             logger.error(f"Error in background worker: {e}")
             await asyncio.sleep(5)
 
-
-async def email_background_worker():
-    """Background worker that processes emails from the queue"""
-    logger.info("Email background worker started")
-    while True:
-        try:
-            if not email_queue_manager:
-                await asyncio.sleep(5)
-                continue
-            
-            # Process email queue
-            await email_queue_manager.process_email_queue(batch_size=10)
-            
-            # Wait before checking again
-            await asyncio.sleep(10)  # Check every 10 seconds
-                
-        except asyncio.CancelledError:
-            logger.info("Email background worker cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Error in email background worker: {e}")
-            await asyncio.sleep(30)  # Wait longer on error
-
+# Email background workers removed - sending emails directly now
 @app.post("/api/books/generate", response_model=JobResponse)
 @limiter.limit("10/minute")
 async def create_book_generation_job(request: Request, body: BatchJobRequest):
@@ -1705,159 +1657,6 @@ async def delete_book(request: Request, id: str):
         import traceback
         logger.debug(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error deleting book: {str(e)}")
-
-# ==================== EMAIL API ENDPOINTS ====================
-
-class ParentalConsentEmailRequest(BaseModel):
-    parent_email: str
-    parent_name: str
-    child_name: str
-
-class GiftNotificationEmailRequest(BaseModel):
-    recipient_email: str
-    recipient_name: str
-    giver_name: str
-    occasion: str
-    gift_message: str
-    delivery_method: str = "immediate_email"
-    scheduled_for: Optional[str] = None
-
-class GiftDeliveryEmailRequest(BaseModel):
-    recipient_email: str
-    recipient_name: str
-    giver_name: str
-    character_name: str
-    character_type: str
-    book_title: str
-    special_ability: str
-    gift_message: str
-    story_link: str
-    download_link: str
-    book_format: str = "story_adventure"
-
-@app.post("/api/emails/queue-parental-consent")
-@limiter.limit("10/minute")
-async def queue_parental_consent_email_endpoint(request: Request, body: ParentalConsentEmailRequest):
-    """Queue parental consent verification email"""
-    try:
-        if not email_queue_manager:
-            raise HTTPException(status_code=503, detail="Email service not available")
-        
-        # Generate consent link (48-hour expiration)
-        # TODO: Implement proper token generation and verification
-        consent_token = str(uuid.uuid4())
-        consent_link = f"{FRONTEND_URL}/consent/verify?token={consent_token}"
-        
-        # Queue the email
-        result = email_queue_manager.queue_email(
-            email_type="parental_consent",
-            to_email=body.parent_email,
-            email_data={
-                "parent_name": body.parent_name,
-                "child_name": body.child_name,
-                "consent_link": consent_link
-            },
-            priority=1  # High priority for compliance
-        )
-        
-        if result.get("id"):
-            logger.info(f"✅ Parental consent email queued for {body.parent_email}")
-            return {"success": True, "job_id": result["id"]}
-        else:
-            logger.error(f"❌ Failed to queue parental consent email: {result.get('error')}")
-            raise HTTPException(status_code=500, detail=result.get("error", "Failed to queue email"))
-            
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error queueing parental consent email: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/emails/queue-gift-notification")
-@limiter.limit("10/minute")
-async def queue_gift_notification_email_endpoint(request: Request, body: GiftNotificationEmailRequest):
-    """Queue gift notification email"""
-    try:
-        if not email_queue_manager:
-            raise HTTPException(status_code=503, detail="Email service not available")
-        
-        # Parse scheduled_for if provided
-        scheduled_for = None
-        if body.scheduled_for:
-            try:
-                scheduled_for = datetime.fromisoformat(body.scheduled_for.replace('Z', '+00:00'))
-            except Exception as e:
-                logger.warning(f"Failed to parse scheduled_for date: {e}")
-        
-        # Queue the email
-        result = email_queue_manager.queue_email(
-            email_type="gift_notification",
-            to_email=body.recipient_email,
-            email_data={
-                "recipient_name": body.recipient_name,
-                "giver_name": body.giver_name,
-                "occasion": body.occasion,
-                "gift_message": body.gift_message,
-                "delivery_method": body.delivery_method
-            },
-            priority=2,
-            scheduled_for=scheduled_for
-        )
-        
-        if result.get("id"):
-            logger.info(f"✅ Gift notification email queued for {body.recipient_email}")
-            return {"success": True, "job_id": result["id"]}
-        else:
-            logger.error(f"❌ Failed to queue gift notification email: {result.get('error')}")
-            raise HTTPException(status_code=500, detail=result.get("error", "Failed to queue email"))
-            
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error queueing gift notification email: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/emails/queue-gift-delivery")
-@limiter.limit("10/minute")
-async def queue_gift_delivery_email_endpoint(request: Request, body: GiftDeliveryEmailRequest):
-    """Queue gift delivery email"""
-    try:
-        if not email_queue_manager:
-            raise HTTPException(status_code=503, detail="Email service not available")
-        
-        # Queue the email
-        result = email_queue_manager.queue_email(
-            email_type="gift_delivery",
-            to_email=body.recipient_email,
-            email_data={
-                "recipient_name": body.recipient_name,
-                "giver_name": body.giver_name,
-                "character_name": body.character_name,
-                "character_type": body.character_type,
-                "book_title": body.book_title,
-                "special_ability": body.special_ability,
-                "gift_message": body.gift_message,
-                "story_link": body.story_link,
-                "download_link": body.download_link,
-                "book_format": body.book_format
-            },
-            priority=2
-        )
-        
-        if result.get("id"):
-            logger.info(f"✅ Gift delivery email queued for {body.recipient_email}")
-            return {"success": True, "job_id": result["id"]}
-        else:
-            logger.error(f"❌ Failed to queue gift delivery email: {result.get('error')}")
-            raise HTTPException(status_code=500, detail=result.get("error", "Failed to queue email"))
-            
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error queueing gift delivery email: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ==================== END EMAIL API ENDPOINTS ====================
 
 @app.get("/api/users/children")
 @limiter.limit("60/minute")
@@ -3669,51 +3468,41 @@ async def handle_payment_succeeded(invoice):
                         supabase.table("users").update(user_update_data).eq("id", user_id).execute()
                         logger.info(f"Updated user {user_id} with active subscription on payment success")
             
-            # Queue payment success email
-            logger.info(f"Attempting to queue payment success email - Email: {customer_email}, Service enabled: {email_service.is_enabled()}")
+            # Send payment success email
+            logger.info(f"Attempting to send payment success email - Email: {customer_email}, Service enabled: {email_service.is_enabled()}")
             
             if not customer_email:
-                logger.warning("Cannot queue payment success email: customer_email is missing")
-            elif not email_service.is_enabled() or not email_queue_manager:
-                logger.warning("Cannot queue payment success email: email service or queue not enabled")
+                logger.warning("Cannot send payment success email: customer_email is missing")
+            elif not email_service.is_enabled():
+                logger.warning("Cannot send payment success email: email service not enabled")
             else:
                 try:
                     amount_display = f"${amount_paid / 100:.2f}" if amount_paid else None
-                    result = email_queue_manager.queue_email(
-                        email_type="payment_success",
+                    
+                    # Send payment success email
+                    send_payment_success(
                         to_email=customer_email,
-                        email_data={
-                            "customer_name": customer_name,
-                            "plan_type": plan_type,
-                            "amount": amount_display,
-                            "next_billing_date": next_billing_date
-                        },
-                        priority=1  # High priority for payment confirmations
+                        customer_name=customer_name,
+                        plan_type=plan_type,
+                        amount=amount_display,
+                        next_billing_date=next_billing_date
                     )
-                    if result.get("id"):
-                        logger.info(f"✅ Payment success email queued for {customer_email}")
-                        
-                        # Also queue receipt email
-                        receipt_result = email_queue_manager.queue_email(
-                            email_type="receipt",
-                            to_email=customer_email,
-                            email_data={
-                                "customer_name": customer_name or "Customer",
-                                "transaction_id": invoice.get("id", "N/A"),
-                                "items": [{"name": f"{plan_type.capitalize()} Subscription", "amount": amount_paid / 100}],
-                                "subtotal": amount_paid / 100,
-                                "tax": 0,
-                                "total": amount_paid / 100,
-                                "transaction_date": datetime.utcnow()
-                            },
-                            priority=2
-                        )
-                        if receipt_result.get("id"):
-                            logger.info(f"✅ Receipt email queued for {customer_email}")
-                    else:
-                        logger.error(f"❌ Failed to queue payment success email: {result.get('error')}")
+                    logger.info(f"✅ Payment success email sent to {customer_email}")
+                    
+                    # Also send receipt email
+                    send_receipt(
+                        to_email=customer_email,
+                        customer_name=customer_name or "Customer",
+                        transaction_id=invoice.get("id", "N/A"),
+                        items=[{"name": f"{plan_type.capitalize()} Subscription", "amount": amount_paid / 100}],
+                        subtotal=amount_paid / 100,
+                        tax=0,
+                        total=amount_paid / 100,
+                        transaction_date=datetime.utcnow()
+                    )
+                    logger.info(f"✅ Receipt email sent to {customer_email}")
                 except Exception as email_error:
-                    logger.error(f"❌ Exception queueing payment success email: {email_error}")
+                    logger.error(f"❌ Exception sending payment success email: {email_error}")
                 
     except Exception as e:
         logger.error(f"Error handling payment succeeded: {e}")
@@ -3781,33 +3570,26 @@ async def handle_payment_failed(invoice):
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq("stripe_subscription_id", subscription_id).execute()
             
-            # Queue payment failed email
-            logger.info(f"Attempting to queue payment failed email - Email: {customer_email}, Service enabled: {email_service.is_enabled()}")
+            # Send payment failed email
+            logger.info(f"Attempting to send payment failed email - Email: {customer_email}, Service enabled: {email_service.is_enabled()}")
             
             if not customer_email:
-                logger.warning("Cannot queue payment failed email: customer_email is missing")
-            elif not email_service.is_enabled() or not email_queue_manager:
-                logger.warning("Cannot queue payment failed email: email service or queue not enabled")
+                logger.warning("Cannot send payment failed email: customer_email is missing")
+            elif not email_service.is_enabled():
+                logger.warning("Cannot send payment failed email: email service not enabled")
             else:
                 try:
                     amount_display = f"${amount_due / 100:.2f}" if amount_due else None
-                    result = email_queue_manager.queue_email(
-                        email_type="payment_failed",
+                    send_payment_failed(
                         to_email=customer_email,
-                        email_data={
-                            "customer_name": customer_name,
-                            "plan_type": plan_type,
-                            "amount": amount_display,
-                            "retry_url": f"{FRONTEND_URL}/account"
-                        },
-                        priority=1  # High priority for payment failures
+                        customer_name=customer_name,
+                        plan_type=plan_type,
+                        amount=amount_display,
+                        retry_url=f"{FRONTEND_URL}/account"
                     )
-                    if result.get("id"):
-                        logger.info(f"✅ Payment failed email queued for {customer_email}")
-                    else:
-                        logger.error(f"❌ Failed to queue payment failed email: {result.get('error')}")
+                    logger.info(f"✅ Payment failed email sent to {customer_email}")
                 except Exception as email_error:
-                    logger.error(f"❌ Exception queueing payment failed email: {email_error}")
+                    logger.error(f"❌ Exception sending payment failed email: {email_error}")
                 
     except Exception as e:
         logger.error(f"Error handling payment failed: {e}")
@@ -3836,6 +3618,95 @@ class AuthSyncRequest(BaseModel):
     user_id: str
     email: str
     name: Optional[str] = None
+
+
+@app.post("/api/emails/parental-consent")
+@limiter.limit("10/minute")
+async def send_parental_consent_email_endpoint(request: Request):
+    """Send parental consent verification email"""
+    try:
+        body = await request.json()
+        
+        parent_email = body.get("parent_email")
+        parent_name = body.get("parent_name")
+        child_name = body.get("child_name")
+        
+        if not all([parent_email, parent_name, child_name]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required fields: parent_email, parent_name, child_name"
+            )
+        
+        if not email_service.is_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail="Email service not available"
+            )
+        
+        # Generate consent link (expires in 48 hours)
+        consent_token = str(uuid.uuid4())
+        consent_link = f"{FRONTEND_URL}/consent/verify?token={consent_token}"
+        
+        # Send the email
+        send_parental_consent(
+            to_email=parent_email,
+            parent_name=parent_name,
+            child_name=child_name,
+            consent_link=consent_link
+        )
+        
+        logger.info(f"✅ Parental consent email sent to {parent_email}")
+        return {"success": True, "message": "Parental consent email sent"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending parental consent email: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/emails/gift-notification")
+@limiter.limit("10/minute")
+async def send_gift_notification_email_endpoint(request: Request):
+    """Send gift notification email"""
+    try:
+        body = await request.json()
+        
+        recipient_email = body.get("recipient_email")
+        recipient_name = body.get("recipient_name")
+        giver_name = body.get("giver_name")
+        occasion = body.get("occasion")
+        gift_message = body.get("gift_message", "")
+        
+        if not all([recipient_email, recipient_name, giver_name, occasion]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required fields: recipient_email, recipient_name, giver_name, occasion"
+            )
+        
+        if not email_service.is_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail="Email service not available"
+            )
+        
+        # Send the email (Note: scheduled sending not supported without queue)
+        send_gift_notification(
+            to_email=recipient_email,
+            recipient_name=recipient_name,
+            giver_name=giver_name,
+            occasion=occasion,
+            gift_message=gift_message
+        )
+        
+        logger.info(f"✅ Gift notification email sent to {recipient_email}")
+        return {"success": True, "message": "Gift notification email sent"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending gift notification email: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/auth/sync")
@@ -3868,28 +3739,22 @@ async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
         welcome_email_sent = False
         
         if is_new_user:
-            # New user - queue welcome email
-            logger.info(f"New user detected: {user_id}, queueing welcome email")
+            # New user - send welcome email
+            logger.info(f"New user detected: {user_id}, sending welcome email")
             
             # Get user's name for the email
             customer_name = name if name else None
             
-            if email_service.is_enabled() and email_queue_manager:
+            if email_service.is_enabled():
                 try:
-                    result = email_queue_manager.queue_email(
-                        email_type="welcome",
+                    send_welcome(
                         to_email=email,
-                        email_data={"customer_name": customer_name},
-                        priority=3
+                        customer_name=customer_name
                     )
-                    
-                    if result.get("id"):
-                        logger.info(f"✅ Welcome email queued for {email}")
-                        welcome_email_sent = True
-                    else:
-                        logger.error(f"❌ Failed to queue welcome email: {result.get('error')}")
+                    logger.info(f"✅ Welcome email sent to {email}")
+                    welcome_email_sent = True
                 except Exception as email_error:
-                    logger.error(f"❌ Exception queueing welcome email: {email_error}")
+                    logger.error(f"❌ Exception sending welcome email: {email_error}")
             else:
                 logger.warning("Email service not enabled, skipping welcome email")
         else:
