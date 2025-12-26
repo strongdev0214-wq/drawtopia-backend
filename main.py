@@ -3605,7 +3605,7 @@ class AuthSyncRequest(BaseModel):
 async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
     """
     Sync user data after successful OTP/Magic Link verification.
-    Sends welcome email on first login.
+    Sends welcome email only for new users (first registration).
     
     This endpoint should be called by the frontend after successful
     Supabase authentication (OTP code entered correctly or magic link clicked).
@@ -3624,49 +3624,17 @@ async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
         logger.info(f"Auth sync requested for user: {user_id} ({email})")
         
         # Check if user exists in our users table
-        user_response = supabase.table("users").select("*").eq("id", user_id).execute()
+        user_response = supabase.table("users").select("id").eq("id", user_id).execute()
         
-        is_new_user = False
+        is_new_user = not user_response.data or len(user_response.data) == 0
+        welcome_email_sent = False
         
-        if not user_response.data or len(user_response.data) == 0:
-            # New user - create record
-            is_new_user = True
-            logger.info(f"Creating new user record for: {user_id}")
-            
-            new_user_data = {
-                "id": user_id,
-                "email": email,
-                "welcome_email_sent": False,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            if name:
-                # Split name into first and last name
-                name_parts = name.strip().split(" ", 1)
-                new_user_data["first_name"] = name_parts[0]
-                if len(name_parts) > 1:
-                    new_user_data["last_name"] = name_parts[1]
-            
-            supabase.table("users").insert(new_user_data).execute()
-            user_data = new_user_data
-        else:
-            user_data = user_response.data[0]
-        
-        # Check if welcome email has been sent
-        welcome_email_sent = user_data.get("welcome_email_sent", False)
-        
-        if not welcome_email_sent:
-            # Send welcome email
-            logger.info(f"Sending welcome email to: {email}")
+        if is_new_user:
+            # New user - send welcome email
+            logger.info(f"New user detected: {user_id}, sending welcome email")
             
             # Get user's name for the email
-            customer_name = None
-            if name:
-                customer_name = name
-            elif user_data.get("first_name"):
-                first_name = user_data.get("first_name", "")
-                last_name = user_data.get("last_name", "")
-                customer_name = f"{first_name} {last_name}".strip()
+            customer_name = name if name else None
             
             if email_service.is_enabled():
                 try:
@@ -3677,12 +3645,7 @@ async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
                     
                     if result.get("success"):
                         logger.info(f"✅ Welcome email sent to {email}")
-                        
-                        # Mark welcome email as sent
-                        supabase.table("users").update({
-                            "welcome_email_sent": True,
-                            "welcome_email_sent_at": datetime.utcnow().isoformat()
-                        }).eq("id", user_id).execute()
+                        welcome_email_sent = True
                     else:
                         logger.error(f"❌ Failed to send welcome email: {result.get('error')}")
                 except Exception as email_error:
@@ -3690,12 +3653,12 @@ async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
             else:
                 logger.warning("Email service not enabled, skipping welcome email")
         else:
-            logger.info(f"Welcome email already sent to user {user_id}")
+            logger.info(f"Existing user {user_id}, skipping welcome email")
         
         return {
             "success": True,
             "is_new_user": is_new_user,
-            "welcome_email_sent": not welcome_email_sent,
+            "welcome_email_sent": welcome_email_sent,
             "message": "User synced successfully"
         }
         
