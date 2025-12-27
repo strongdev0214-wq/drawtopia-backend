@@ -1659,7 +1659,7 @@ async def delete_book(request: Request, id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting book: {str(e)}")
 
 @app.get("/api/users/children")
-@limiter.limit("60/minute")
+@limiter.limit("120/minute")  # Increased from 60 to 120 for dashboard usage
 async def list_child_profiles(request: Request, parent_id: Optional[str] = None):
     """
     List child profiles from the child_profiles table
