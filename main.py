@@ -3665,6 +3665,44 @@ async def send_parental_consent_email_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/emails/welcome")
+@limiter.limit("10/minute")
+async def send_welcome_email_endpoint(request: Request):
+    """Send welcome email to new user"""
+    try:
+        body = await request.json()
+        
+        to_email = body.get("to_email")
+        customer_name = body.get("customer_name")
+        
+        if not to_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: to_email"
+            )
+        
+        if not email_service.is_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail="Email service not available"
+            )
+        
+        # Send welcome email
+        await send_welcome(
+            to_email=to_email,
+            customer_name=customer_name
+        )
+        
+        logger.info(f"✅ Welcome email sent to {to_email}")
+        return {"success": True, "message": "Welcome email sent"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending welcome email: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/emails/gift-notification")
 @limiter.limit("10/minute")
 async def send_gift_notification_email_endpoint(request: Request):
