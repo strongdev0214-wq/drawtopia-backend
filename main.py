@@ -1702,12 +1702,15 @@ async def list_child_profiles(request: Request, parent_id: Optional[str] = None)
 
 @app.get("/api/characters")
 @limiter.limit("60/minute")
-async def list_characters(request: Request):
+async def list_characters(request: Request, parent_id: Optional[str] = None):
     """
     List all created characters from the stories table
     
+    Args:
+        parent_id: Optional parent user ID to filter characters by parent's children
+    
     Returns:
-        List of character data from stories
+        List of character data from stories, optionally filtered by parent
     """
     try:
         if not supabase:
@@ -1716,9 +1719,23 @@ async def list_characters(request: Request):
                 detail="Database service not available"
             )
         
-        # Query all stories to get character data
-        # Select character-related fields from stories table
-        response = supabase.table("stories").select("*").execute()
+        # If parent_id is provided, filter by parent's children
+        if parent_id:
+            # First, get all child profile IDs for this parent
+            child_profiles_response = supabase.table("child_profiles").select("id").eq("parent_id", parent_id).execute()
+            
+            if child_profiles_response.data is None or len(child_profiles_response.data) == 0:
+                logger.info(f"No child profiles found for parent {parent_id}")
+                return []
+            
+            # Extract child profile IDs
+            child_profile_ids = [profile["id"] for profile in child_profiles_response.data]
+            
+            # Get stories only for these child profiles
+            response = supabase.table("stories").select("*").in_("child_profile_id", child_profile_ids).execute()
+        else:
+            # Query all stories to get character data
+            response = supabase.table("stories").select("*").execute()
         
         if response.data is None:
             logger.warning("No characters found or query returned None")
@@ -1728,7 +1745,7 @@ async def list_characters(request: Request):
         # Each story contains character data (character_name, character_type, etc.)
         characters = response.data
         
-        logger.info(f"Retrieved {len(characters)} characters from stories")
+        logger.info(f"Retrieved {len(characters)} characters from stories" + (f" for parent {parent_id}" if parent_id else ""))
         
         return characters
         
