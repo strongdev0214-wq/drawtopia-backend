@@ -93,6 +93,8 @@ STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID_MONTHLY = os.getenv("STRIPE_PRICE_ID_MONTHLY", "")
 STRIPE_PRICE_ID_YEARLY = os.getenv("STRIPE_PRICE_ID_YEARLY", "")
+STRIPE_PRICE_ID_SINGLE_STORY = os.getenv("STRIPE_PRICE_ID_SINGLE_STORY", "")
+STRIPE_PRICE_ID_STORY_BUNDLE = os.getenv("STRIPE_PRICE_ID_STORY_BUNDLE", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 # Initialize Stripe
@@ -2701,6 +2703,14 @@ class CreateSubscriptionRequest(BaseModel):
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
 
+class CreateOnetimeCheckoutRequest(BaseModel):
+    """Request model for creating a one-time purchase checkout session"""
+    purchase_type: str  # "single_story" or "story_bundle"
+    user_email: Optional[str] = None
+    user_id: Optional[str] = None
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
 class SubscriptionResponse(BaseModel):
     """Response model for subscription operations"""
     success: bool
@@ -3014,6 +3024,81 @@ async def create_subscription_checkout(request: CreateSubscriptionRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error creating subscription checkout: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {str(e)}")
+
+
+@app.post("/api/stripe/create-onetime-checkout", response_model=SubscriptionResponse)
+async def create_onetime_checkout(request: CreateOnetimeCheckoutRequest):
+    """
+    Create a Stripe Checkout Session for one-time purchases (single story or story bundle).
+    This redirects the user to Stripe's hosted checkout page.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
+    try:
+        # Determine which price ID to use
+        if request.purchase_type == "story_bundle":
+            price_id = STRIPE_PRICE_ID_STORY_BUNDLE
+            product_name = "Story Bundle (3 Stories)"
+        else:  # single_story
+            price_id = STRIPE_PRICE_ID_SINGLE_STORY
+            product_name = "Single Story"
+        
+        if not price_id:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Price ID for {request.purchase_type} is not configured"
+            )
+        
+        # Set success and cancel URLs
+        success_url = request.success_url or f"{FRONTEND_URL}/purchase/success?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = request.cancel_url or f"{FRONTEND_URL}/pricing"
+        
+        # Build checkout session parameters
+        checkout_params = {
+            "mode": "payment",  # One-time payment
+            "payment_method_types": ["card"],
+            "line_items": [
+                {
+                    "price": price_id,
+                    "quantity": 1,
+                }
+            ],
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "allow_promotion_codes": True,
+            "billing_address_collection": "auto",
+        }
+        
+        # Add customer email if provided
+        if request.user_email:
+            checkout_params["customer_email"] = request.user_email
+        
+        # Add metadata for tracking
+        checkout_params["metadata"] = {
+            "user_id": request.user_id or "",
+            "purchase_type": request.purchase_type,
+            "product_name": product_name,
+            "source": "drawtopia_pricing_page"
+        }
+        
+        # Create the checkout session
+        checkout_session = stripe.checkout.Session.create(**checkout_params)
+        
+        logger.info(f"Created Stripe one-time checkout session: {checkout_session.id} for {product_name}")
+        
+        return SubscriptionResponse(
+            success=True,
+            checkout_url=checkout_session.url,
+            session_id=checkout_session.id
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating one-time checkout session: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating one-time checkout: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {str(e)}")
 
 
