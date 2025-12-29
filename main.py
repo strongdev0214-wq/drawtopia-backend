@@ -140,23 +140,25 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for background tasks"""
     global queue_manager, batch_processor, worker_task
     
-    # Initialize queue manager
-    if supabase:
-        queue_manager = QueueManager(supabase)
-        
-        # Initialize batch processor (without email queue manager)
-        batch_processor = BatchProcessor(
-            queue_manager=queue_manager,
-            gemini_client=gemini_client,
-            openai_api_key=OPENAI_API_KEY,
-            supabase_client=supabase,
-            gemini_text_model=GEMINI_TEXT_MODEL
-        )
-        logger.info("✅ Queue manager and batch processor initialized")
-        
-        # Start background worker
-        worker_task = asyncio.create_task(background_worker())
-        logger.info("✅ Background worker started")
+    # Queue manager disabled - uncomment to re-enable
+    # if supabase:
+    #     queue_manager = QueueManager(supabase)
+    #     
+    #     # Initialize batch processor (without email queue manager)
+    #     batch_processor = BatchProcessor(
+    #         queue_manager=queue_manager,
+    #         gemini_client=gemini_client,
+    #         openai_api_key=OPENAI_API_KEY,
+    #         supabase_client=supabase,
+    #         gemini_text_model=GEMINI_TEXT_MODEL
+    #     )
+    #     logger.info("✅ Queue manager and batch processor initialized")
+    #     
+    #     # Start background worker
+    #     worker_task = asyncio.create_task(background_worker())
+    #     logger.info("✅ Background worker started")
+    
+    logger.info("✅ Server started (queue system disabled)")
     
     yield
     
@@ -1340,31 +1342,35 @@ class PDFGenerationResponse(BaseModel):
     message: str
 
 async def background_worker():
-    """Background worker that processes jobs from the queue"""
-    logger.info("Background worker started")
-    while True:
-        try:
-            if not queue_manager:
-                await asyncio.sleep(5)
-                continue
-            
-            # Get next job
-            job = queue_manager.get_next_job()
-            
-            if job:
-                job_id = job["id"]
-                logger.info(f"Processing job {job_id}")
-                await batch_processor.process_job(job_id)
-            else:
-                # No jobs available, wait before checking again
-                await asyncio.sleep(2)
-                
-        except asyncio.CancelledError:
-            logger.info("Background worker cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Error in background worker: {e}")
-            await asyncio.sleep(5)
+    """Background worker that processes jobs from the queue (DISABLED)"""
+    logger.info("Background worker disabled - queue system not in use")
+    return
+    
+    # Original code - uncomment to re-enable queue processing
+    # logger.info("Background worker started")
+    # while True:
+    #     try:
+    #         if not queue_manager:
+    #             await asyncio.sleep(5)
+    #             continue
+    #         
+    #         # Get next job
+    #         job = queue_manager.get_next_job()
+    #         
+    #         if job:
+    #             job_id = job["id"]
+    #             logger.info(f"Processing job {job_id}")
+    #             await batch_processor.process_job(job_id)
+    #         else:
+    #             # No jobs available, wait before checking again
+    #             await asyncio.sleep(2)
+    #             
+    #     except asyncio.CancelledError:
+    #         logger.info("Background worker cancelled")
+    #         break
+    #     except Exception as e:
+    #         logger.error(f"Error in background worker: {e}")
+    #         await asyncio.sleep(5)
 
 # Email background workers removed - sending emails directly now
 @app.post("/api/books/generate", response_model=JobResponse)
