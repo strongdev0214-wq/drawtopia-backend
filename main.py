@@ -3219,6 +3219,8 @@ async def handle_checkout_completed(session):
         
         # Get subscription details from Stripe
         subscription = stripe.Subscription.retrieve(subscription_id)
+
+        print('[handle_checkout_completed] subscription:', user_id, customer_id, subscription_id, customer_email, price_type);
         
         # Save to database
         if supabase:
