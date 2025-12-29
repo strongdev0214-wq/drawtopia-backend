@@ -2706,6 +2706,7 @@ class CreateSubscriptionRequest(BaseModel):
 class CreateOnetimeCheckoutRequest(BaseModel):
     """Request model for creating a one-time purchase checkout session"""
     purchase_type: str  # "single_story" or "story_bundle"
+    story_id: Optional[str] = None  # Story ID to mark as purchased after payment
     user_email: Optional[str] = None
     user_id: Optional[str] = None
     success_url: Optional[str] = None
@@ -3080,6 +3081,7 @@ async def create_onetime_checkout(request: CreateOnetimeCheckoutRequest):
             "user_id": request.user_id or "",
             "purchase_type": request.purchase_type,
             "product_name": product_name,
+            "story_id": request.story_id or "",
             "source": "drawtopia_pricing_page"
         }
         
@@ -3410,13 +3412,43 @@ async def stripe_webhook(request: Request):
 async def handle_checkout_completed(session):
     """Handle successful checkout session completion"""
     try:
-        if session.get("mode") != "subscription":
+        mode = session.get("mode")
+        metadata = session.get("metadata", {})
+        
+        # Handle one-time payment (story purchase)
+        if mode == "payment":
+            story_id = metadata.get("story_id")
+            user_id = metadata.get("user_id")
+            purchase_type = metadata.get("purchase_type")
+            payment_status = session.get("payment_status")
+            
+            logger.info(f"Checkout completed for one-time payment: story_id={story_id}, user_id={user_id}")
+            
+            # Mark story as purchased if story_id is provided and payment is successful
+            if story_id and payment_status == "paid" and supabase:
+                try:
+                    # Update the story's purchased field to true
+                    update_result = supabase.table("stories").update({
+                        "purchased": True
+                    }).eq("id", story_id).execute()
+                    
+                    if update_result.data and len(update_result.data) > 0:
+                        logger.info(f"Successfully marked story {story_id} as purchased")
+                    else:
+                        logger.warning(f"No story found with id {story_id} to mark as purchased")
+                        
+                except Exception as e:
+                    logger.error(f"Error marking story {story_id} as purchased: {e}")
+            
+            return
+        
+        # Handle subscription payment
+        if mode != "subscription":
             return
         
         customer_id = session.get("customer")
         subscription_id = session.get("subscription")
         customer_email = session.get("customer_email") or session.get("customer_details", {}).get("email")
-        metadata = session.get("metadata", {})
         user_id = metadata.get("user_id")
         price_type = metadata.get("price_type", "monthly")
         
