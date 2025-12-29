@@ -3428,9 +3428,11 @@ async def handle_checkout_completed(session):
             if story_id and payment_status == "paid" and supabase:
                 try:
                     # Update the story's purchased field to true
+                    logger.info(f"Updating story {story_id} as purchased")
+                    
                     update_result = supabase.table("stories").update({
                         "purchased": True
-                    }).eq("id", story_id).execute()
+                    }).eq("uid", story_id).execute()
                     
                     if update_result.data and len(update_result.data) > 0:
                         logger.info(f"Successfully marked story {story_id} as purchased")
