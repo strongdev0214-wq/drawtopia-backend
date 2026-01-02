@@ -4005,6 +4005,155 @@ async def send_gift_notification_email_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/gift/deliver")
+async def deliver_gift_endpoint(request: Request):
+    """
+    Deliver a scheduled gift via web push notification.
+    This endpoint is called by the edge function cron job.
+    No rate limiting applied as this is an internal service endpoint.
+    """
+    try:
+        body = await request.json()
+        gift_id = body.get("gift_id")
+        
+        if not gift_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: gift_id"
+            )
+        
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        logger.info(f"🎁 Processing gift delivery for gift_id: {gift_id}")
+        
+        # Get the gift details from database
+        gift_response = supabase.table("gifts").select("*").eq("id", gift_id).single().execute()
+        
+        if not gift_response.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Gift not found: {gift_id}"
+            )
+        
+        gift = gift_response.data
+        
+        # Validate gift can be delivered
+        if gift.get("notification_sent") == True:
+            logger.warning(f"Gift {gift_id} already delivered")
+            return {
+                "success": True,
+                "message": "Gift already delivered",
+                "already_sent": True
+            }
+        
+        if gift.get("status") != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Gift status is '{gift.get('status')}', must be 'completed' to deliver"
+            )
+        
+        if not gift.get("to_user_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="Gift has no recipient user ID (to_user_id)"
+            )
+        
+        # Call the send-gift-notification edge function to send web push
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_anon_key = os.getenv("SUPABASE_ANON_KEY")
+        
+        edge_function_url = f"{supabase_url}/functions/v1/send-gift-notification"
+        
+        logger.info(f"📤 Calling edge function to send push notification for gift {gift_id}")
+        
+        edge_response = requests.post(
+            edge_function_url,
+            json={
+                "giftId": gift_id,
+                "mode": "single"
+            },
+            headers={
+                "Authorization": f"Bearer {supabase_anon_key}",
+                "Content-Type": "application/json"
+            },
+            timeout=30
+        )
+        
+        if edge_response.status_code != 200:
+            logger.error(f"Edge function call failed: {edge_response.text}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send push notification: {edge_response.text}"
+            )
+        
+        edge_result = edge_response.json()
+        
+        if not edge_result.get("success"):
+            logger.error(f"Edge function returned error: {edge_result}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Push notification failed: {edge_result.get('error', 'Unknown error')}"
+            )
+        
+        logger.info(f"✅ Gift {gift_id} delivered successfully via web push notification")
+        
+        # Also send delivery email if enabled
+        if email_service.is_enabled():
+            try:
+                # Get sender information
+                sender_id = gift.get("from_user_id")
+                sender_name = "Someone special"
+                
+                if sender_id:
+                    try:
+                        # Try to get sender's name from Supabase auth
+                        auth_response = supabase.auth.admin.get_user_by_id(sender_id)
+                        if auth_response and auth_response.user:
+                            sender_name = (
+                                auth_response.user.user_metadata.get("name") or
+                                auth_response.user.user_metadata.get("full_name") or
+                                auth_response.user.email.split('@')[0] if auth_response.user.email else sender_name
+                            )
+                    except Exception as e:
+                        logger.warning(f"Could not fetch sender name: {e}")
+                
+                # Get recipient email
+                recipient_email = gift.get("delivery_email")
+                
+                if recipient_email:
+                    await send_gift_delivery(
+                        to_email=recipient_email,
+                        recipient_name=gift.get("child_name", "there"),
+                        giver_name=sender_name,
+                        occasion=gift.get("occasion", "special occasion"),
+                        child_name=gift.get("child_name", ""),
+                        gift_url=f"{FRONTEND_URL}/gift/recipient/gift1?giftId={gift_id}"
+                    )
+                    logger.info(f"✅ Gift delivery email also sent to {recipient_email}")
+            except Exception as email_error:
+                logger.warning(f"Failed to send delivery email (not critical): {email_error}")
+        
+        return {
+            "success": True,
+            "message": "Gift delivered successfully",
+            "gift_id": gift_id,
+            "push_notification_sent": True,
+            "results": edge_result.get("results", [])
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error delivering gift: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/auth/sync")
 @limiter.limit("10/minute")
 async def sync_user_after_auth(request: Request, body: AuthSyncRequest):
