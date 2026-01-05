@@ -1776,6 +1776,72 @@ async def list_characters(request: Request, parent_id: Optional[str] = None):
         logger.debug(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error listing characters: {str(e)}")
 
+@app.delete("/api/characters/{character_id}")
+@limiter.limit("30/minute")
+async def delete_character(request: Request, character_id: str, user_id: Optional[str] = None):
+    """
+    Delete a character and update related stories
+    
+    Args:
+        character_id: ID of the character to delete
+        user_id: Optional user ID for authorization check
+    
+    Returns:
+        Success message with details of the deletion
+    """
+    try:
+        if not supabase:
+            raise HTTPException(
+                status_code=500,
+                detail="Database service not available"
+            )
+        
+        logger.info(f"Attempting to delete character {character_id} for user {user_id}")
+        
+        # First, verify the character exists and belongs to the user (if user_id provided)
+        if user_id:
+            character_response = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", user_id).execute()
+        else:
+            character_response = supabase.table("characters").select("*").eq("id", character_id).execute()
+        
+        if not character_response.data or len(character_response.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Character not found or you don't have permission to delete it"
+            )
+        
+        # Update all stories that reference this character - set character_id to null
+        stories_update_response = supabase.table("stories").update({"character_id": None}).eq("character_id", character_id).execute()
+        
+        updated_stories_count = len(stories_update_response.data) if stories_update_response.data else 0
+        logger.info(f"Updated {updated_stories_count} stories by removing character reference")
+        
+        # Delete the character
+        delete_response = supabase.table("characters").delete().eq("id", character_id).execute()
+        
+        if not delete_response.data or len(delete_response.data) == 0:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete character"
+            )
+        
+        logger.info(f"Successfully deleted character {character_id}")
+        
+        return {
+            "success": True,
+            "message": "Character deleted successfully",
+            "character_id": character_id,
+            "stories_updated": updated_stories_count
+        }
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting character: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error deleting character: {str(e)}")
+
 @app.get("/api/dashboard/user-statistics")
 @limiter.limit("30/minute")
 async def get_user_statistics(
