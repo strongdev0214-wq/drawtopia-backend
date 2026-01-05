@@ -2277,7 +2277,7 @@ async def generate_story_endpoint(request: Request, body: StoryRequest):
                     "story_type": "story"
                 }
                 
-                result = supabase.table("stories").insert(story_data).select().execute()
+                result = supabase.table("stories").insert(story_data).execute()
                 
                 if result.data and len(result.data) > 0:
                     story_id = result.data[0].get("id")
