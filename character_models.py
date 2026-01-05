@@ -46,7 +46,6 @@ class Character(BaseModel):
     description: Optional[str] = None
     
     # Usage stats
-    times_used: int = 0
     last_used_at: Optional[datetime] = None
     
     # Status
@@ -280,10 +279,10 @@ class CharacterService:
             if not char_result["success"]:
                 return char_result
             
-            current_times_used = char_result["data"].get("times_used", 0)
+            # current_times_used = char_result["data"].get("times_used", 0)
             
             result = self.supabase.table(self.table_name).update({
-                "times_used": current_times_used + 1,
+                # "times_used": current_times_used + 1,
                 "last_used_at": datetime.utcnow().isoformat()
             }).eq("id", character_id).execute()
             
