@@ -1716,13 +1716,13 @@ async def list_child_profiles(request: Request, parent_id: Optional[str] = None)
 @limiter.limit("60/minute")
 async def list_characters(request: Request, parent_id: Optional[str] = None):
     """
-    List all created characters from the stories table
+    List all created characters from the characters table with associated stories
     
     Args:
-        parent_id: Optional parent user ID to filter characters by parent's children
+        parent_id: Required parent user ID to filter characters by parent
     
     Returns:
-        List of character data from stories, optionally filtered by parent
+        List of character data with associated story information
     """
     try:
         if not supabase:
@@ -1731,35 +1731,42 @@ async def list_characters(request: Request, parent_id: Optional[str] = None):
                 detail="Database service not available"
             )
         
-        # If parent_id is provided, filter by parent's children
+        # If parent_id is provided, filter by parent_id
         if parent_id:
-            # First, get all child profile IDs for this parent
-            child_profiles_response = supabase.table("child_profiles").select("id").eq("parent_id", parent_id).execute()
-            
-            if child_profiles_response.data is None or len(child_profiles_response.data) == 0:
-                logger.info(f"No child profiles found for parent {parent_id}")
-                return []
-            
-            # Extract child profile IDs
-            child_profile_ids = [profile["id"] for profile in child_profiles_response.data]
-            
-            # Get stories only for these child profiles
-            response = supabase.table("stories").select("*").in_("child_profile_id", child_profile_ids).execute()
-        else:
-            # Query all stories to get character data
-            response = supabase.table("stories").select("*").execute()
+            response = supabase.table("characters").select("*").eq("user_id", parent_id).execute()
         
         if response.data is None:
             logger.warning("No characters found or query returned None")
             return []
         
-        # Extract character information from stories
-        # Each story contains character data (character_name, character_type, etc.)
         characters = response.data
+        logger.info(f"Retrieved {len(characters)} characters for parent {parent_id}")
         
-        logger.info(f"Retrieved {len(characters)} characters from stories" + (f" for parent {parent_id}" if parent_id else ""))
+        # Enrich each character with associated story information
+        enriched_characters = []
+        for character in characters:
+            character_id = character.get("id")
+            
+            # Get stories associated with this character
+            if character_id:
+                stories_response = supabase.table("stories").select("*").eq("user_id", parent_id).eq("character_id", character_id).execute()
+                
+                # Add stories to character data
+                character_with_stories = {
+                    **character,
+                    "stories": stories_response.data if stories_response.data else []
+                }
+                enriched_characters.append(character_with_stories)
+            else:
+                # If no character_id, add empty stories list
+                enriched_characters.append({
+                    **character,
+                    "stories": []
+                })
         
-        return characters
+        logger.info(f"Enriched {len(enriched_characters)} characters with story information")
+        
+        return enriched_characters
         
     except HTTPException as e:
         raise e
