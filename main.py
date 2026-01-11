@@ -300,6 +300,8 @@ class StoryRequest(BaseModel):
     child_profile_id: Optional[int] = None  # Child profile ID for database record
     character_style: Optional[str] = None  # Character style (3d/cartoon/anime)
     enhanced_images: Optional[List[str]] = None  # Enhanced character images
+    dedication_text: Optional[str] = None  # Dedication page text
+    dedication_scene_prompt: Optional[str] = None  # Dedication scene prompt according to story environment
     
     class Config:
         json_schema_extra = {
@@ -349,6 +351,7 @@ class StoryResponse(BaseModel):
     page_word_counts: List[int]
     consistency_summary: Optional[Dict[str, Any]] = None  # Overall validation summary
     audio_urls: Optional[List[Optional[str]]] = None  # List of audio URLs (one per page, None if failed)
+    dedication_image_url: Optional[str] = None  # URL to the generated dedication image
     
     class Config:
         json_schema_extra = {
@@ -2079,6 +2082,40 @@ async def generate_story_endpoint(request: Request, body: StoryRequest):
         
         logger.info(f"Story generated successfully. Word count: {story_result['word_count']}")
         
+        # Generate dedication image FIRST before story images (if dedication info is provided)
+        dedication_image_url = None
+        if body.dedication_text and body.dedication_scene_prompt:
+            logger.info("Generating dedication page image...")
+            try:
+                # Create blank base image for dedication (typically portrait format for dedication pages)
+                dedication_base_image = create_blank_base_image(width=768, height=1024)  # Portrait format
+                
+                # Use edit_image function to generate the dedication image
+                logger.info("Calling edit_image function for dedication page...")
+                dedication_image_bytes = edit_image(dedication_base_image, body.dedication_scene_prompt, None)
+                
+                # Optimize image to JPG format
+                logger.info("Optimizing dedication image to JPG format...")
+                optimized_dedication_image = optimize_image_to_jpg(dedication_image_bytes)
+                
+                # Generate unique filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                unique_id = str(uuid.uuid4())[:8]
+                dedication_filename = f"dedication_{timestamp}_{unique_id}.jpg"
+                
+                # Upload to Supabase and get URL
+                dedication_storage_result = upload_to_supabase(optimized_dedication_image, dedication_filename)
+                
+                if dedication_storage_result.get("uploaded") and dedication_storage_result.get("url"):
+                    dedication_image_url = dedication_storage_result['url']
+                    logger.info(f"✅ Dedication image generated and uploaded: {dedication_image_url}")
+                else:
+                    logger.warning("Failed to upload dedication image")
+            except Exception as e:
+                logger.error(f"Error generating dedication image: {e}")
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+        
         # Generate scene images for each page using Gemini Pro image preview model
         logger.info("Generating scene images with Gemini Pro image preview model for each story page...")
         reference_image_url = str(body.character_image_url) if body.character_image_url else None
@@ -2317,7 +2354,8 @@ async def generate_story_endpoint(request: Request, body: StoryRequest):
             word_count=story_result['word_count'],
             page_word_counts=story_result['page_word_counts'],
             consistency_summary=consistency_summary,
-            audio_urls=audio_urls if audio_urls else None
+            audio_urls=audio_urls if audio_urls else None,
+            dedication_image_url=dedication_image_url
         )
         
     except ValueError as e:
